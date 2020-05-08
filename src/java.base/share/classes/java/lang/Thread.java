@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1994, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1994, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -140,8 +140,7 @@ import jdk.internal.HotSpotIntrinsicCandidate;
  * @see     #stop()
  * @since   1.0
  */
-public
-class Thread implements Runnable {
+public class Thread implements Runnable {
     /* Make sure registerNatives is the first thing <clinit> does. */
     private static native void registerNatives();
     static {
@@ -243,7 +242,7 @@ class Thread implements Runnable {
      */
     public static final int MIN_PRIORITY = 1;
 
-   /**
+    /**
      * The default priority that is assigned to a thread.
      */
     public static final int NORM_PRIORITY = 5;

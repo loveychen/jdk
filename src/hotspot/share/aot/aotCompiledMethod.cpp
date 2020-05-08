@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -37,6 +37,7 @@
 #include "runtime/frame.inline.hpp"
 #include "runtime/handles.inline.hpp"
 #include "runtime/java.hpp"
+#include "runtime/orderAccess.hpp"
 #include "runtime/os.hpp"
 #include "runtime/safepointVerifiers.hpp"
 #include "runtime/sharedRuntime.hpp"
@@ -312,7 +313,7 @@ void AOTCompiledMethod::print_on(outputStream* st) const {
 void AOTCompiledMethod::print_on(outputStream* st, const char* msg) const {
   if (st != NULL) {
     ttyLocker ttyl;
-    st->print("%7d ", (int) st->time_stamp().milliseconds());
+    st->print("%7d ", (int) tty->time_stamp().milliseconds());
     st->print("%4d ", _aot_id);    // print compilation number
     st->print("    aot[%2d]", _heap->dso_id());
     // Stubs have _method == NULL

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -65,7 +65,6 @@
   template(java_lang_Cloneable,                       "java/lang/Cloneable")                      \
   template(java_lang_Throwable,                       "java/lang/Throwable")                      \
   template(java_lang_ClassLoader,                     "java/lang/ClassLoader")                    \
-  template(java_lang_ClassLoader_NativeLibrary,       "java/lang/ClassLoader\x024NativeLibrary")  \
   template(java_lang_ThreadDeath,                     "java/lang/ThreadDeath")                    \
   template(java_lang_Boolean,                         "java/lang/Boolean")                        \
   template(java_lang_Character,                       "java/lang/Character")                      \
@@ -94,6 +93,7 @@
   template(java_lang_reflect_Field,                   "java/lang/reflect/Field")                  \
   template(java_lang_reflect_Parameter,               "java/lang/reflect/Parameter")              \
   template(java_lang_reflect_Array,                   "java/lang/reflect/Array")                  \
+  template(java_lang_reflect_RecordComponent,         "java/lang/reflect/RecordComponent")        \
   template(java_lang_StringBuffer,                    "java/lang/StringBuffer")                   \
   template(java_lang_StringBuilder,                   "java/lang/StringBuilder")                  \
   template(java_lang_CharSequence,                    "java/lang/CharSequence")                   \
@@ -127,7 +127,9 @@
   template(jdk_internal_vm_PostVMInitHook,            "jdk/internal/vm/PostVMInitHook")           \
   template(sun_net_www_ParseUtil,                     "sun/net/www/ParseUtil")                    \
   template(java_util_Iterator,                        "java/util/Iterator")                       \
+  template(java_lang_Record,                          "java/lang/Record")                       \
                                                                                                   \
+  template(jdk_internal_loader_NativeLibraries,       "jdk/internal/loader/NativeLibraries")      \
   template(jdk_internal_loader_ClassLoaders_AppClassLoader,      "jdk/internal/loader/ClassLoaders$AppClassLoader")      \
   template(jdk_internal_loader_ClassLoaders_PlatformClassLoader, "jdk/internal/loader/ClassLoaders$PlatformClassLoader") \
                                                                                                   \
@@ -161,6 +163,7 @@
   template(tag_deprecated,                            "Deprecated")                               \
   template(tag_source_debug_extension,                "SourceDebugExtension")                     \
   template(tag_signature,                             "Signature")                                \
+  template(tag_record,                                "Record")                                   \
   template(tag_runtime_visible_annotations,           "RuntimeVisibleAnnotations")                \
   template(tag_runtime_invisible_annotations,         "RuntimeInvisibleAnnotations")              \
   template(tag_runtime_visible_parameter_annotations, "RuntimeVisibleParameterAnnotations")       \
@@ -433,8 +436,6 @@
   template(input_stream_signature,                    "Ljava/io/InputStream;")                    \
   template(print_stream_signature,                    "Ljava/io/PrintStream;")                    \
   template(security_manager_signature,                "Ljava/lang/SecurityManager;")              \
-  template(definePackage_name,                        "definePackage")                            \
-  template(definePackage_signature,                   "(Ljava/lang/String;Ljava/lang/Module;)Ljava/lang/Package;") \
   template(defineOrCheckPackage_name,                 "defineOrCheckPackage")                     \
   template(defineOrCheckPackage_signature,            "(Ljava/lang/String;Ljava/util/jar/Manifest;Ljava/net/URL;)Ljava/lang/Package;") \
   template(fileToEncodedURL_name,                     "fileToEncodedURL")                         \
@@ -562,6 +563,8 @@
   template(char_StringBuffer_signature,               "(C)Ljava/lang/StringBuffer;")                              \
   template(int_String_signature,                      "(I)Ljava/lang/String;")                                    \
   template(boolean_boolean_int_signature,             "(ZZ)I")                                                    \
+  template(big_integer_shift_worker_signature,        "([I[IIII)V")                                               \
+  template(reflect_method_signature,                  "Ljava/lang/reflect/Method;")                                                    \
   /* signature symbols needed by intrinsics */                                                                    \
   VM_INTRINSICS_DO(VM_INTRINSIC_IGNORE, VM_SYMBOL_IGNORE, VM_SYMBOL_IGNORE, template, VM_ALIAS_IGNORE)            \
                                                                                                                   \
@@ -879,6 +882,8 @@
    do_name(     isArray_name,                                    "isArray")                                             \
   do_intrinsic(_isPrimitive,              java_lang_Class,        isPrimitive_name, void_boolean_signature,      F_RN)  \
    do_name(     isPrimitive_name,                                "isPrimitive")                                         \
+  do_intrinsic(_isHidden,                 java_lang_Class,        isHidden_name, void_boolean_signature,         F_RN)  \
+   do_name(     isHidden_name,                                   "isHidden")                                            \
   do_intrinsic(_getSuperclass,            java_lang_Class,        getSuperclass_name, void_class_signature,      F_RN)  \
    do_name(     getSuperclass_name,                              "getSuperclass")                                       \
   do_intrinsic(_Class_cast,               java_lang_Class,        Class_cast_name, object_object_signature,      F_R)   \
@@ -1002,6 +1007,12 @@
   do_intrinsic(_montgomerySquare,      java_math_BigInteger, montgomerySquare_name, montgomerySquare_signature, F_S)    \
    do_name(     montgomerySquare_name,                             "implMontgomerySquare")                              \
    do_signature(montgomerySquare_signature,                        "([I[IIJ[I)[I")                                      \
+                                                                                                                        \
+  do_intrinsic(_bigIntegerRightShiftWorker, java_math_BigInteger, rightShift_name, big_integer_shift_worker_signature, F_S) \
+   do_name(     rightShift_name,                                 "shiftRightImplWorker")                                \
+                                                                                                                        \
+  do_intrinsic(_bigIntegerLeftShiftWorker, java_math_BigInteger, leftShift_name, big_integer_shift_worker_signature, F_S) \
+   do_name(     leftShift_name,                                 "shiftLeftImplWorker")                                  \
                                                                                                                         \
   do_class(jdk_internal_util_ArraysSupport, "jdk/internal/util/ArraysSupport")                                                          \
   do_intrinsic(_vectorizedMismatch, jdk_internal_util_ArraysSupport, vectorizedMismatch_name, vectorizedMismatch_signature, F_S)\
@@ -1555,8 +1566,6 @@ class vmSymbols: AllStatic {
     assert(_type_signatures[t] != NULL, "domain check");
     return _type_signatures[t];
   }
-  // inverse of type_signature; returns T_OBJECT if s is not recognized
-  static BasicType signature_type(const Symbol* s);
 
   static Symbol* symbol_at(SID id) {
     assert(id >= FIRST_SID && id < SID_LIMIT, "oob");

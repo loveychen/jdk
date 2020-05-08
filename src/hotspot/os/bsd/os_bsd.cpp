@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1999, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -51,7 +51,6 @@
 #include "runtime/javaCalls.hpp"
 #include "runtime/mutexLocker.hpp"
 #include "runtime/objectMonitor.hpp"
-#include "runtime/orderAccess.hpp"
 #include "runtime/osThread.hpp"
 #include "runtime/perfMemory.hpp"
 #include "runtime/semaphore.hpp"
@@ -142,6 +141,13 @@ static bool check_signals = true;
 static int SR_signum = SIGUSR2;
 sigset_t SR_sigset;
 
+#ifdef __APPLE__
+static const int processor_id_unassigned = -1;
+static const int processor_id_assigning = -2;
+static const int processor_id_map_size = 256;
+static volatile int processor_id_map[processor_id_map_size];
+static volatile int processor_id_next = 0;
+#endif
 
 ////////////////////////////////////////////////////////////////////////////////
 // utility functions
@@ -167,6 +173,22 @@ julong os::Bsd::available_memory() {
   }
 #endif
   return available;
+}
+
+// for more info see :
+// https://man.openbsd.org/sysctl.2
+void os::Bsd::print_uptime_info(outputStream* st) {
+  struct timeval boottime;
+  size_t len = sizeof(boottime);
+  int mib[2];
+  mib[0] = CTL_KERN;
+  mib[1] = KERN_BOOTTIME;
+
+  if (sysctl(mib, 2, &boottime, &len, NULL, 0) >= 0) {
+    time_t bootsec = boottime.tv_sec;
+    time_t currsec = time(NULL);
+    os::print_dhm(st, "OS uptime:", (long) difftime(currsec, bootsec));
+  }
 }
 
 julong os::physical_memory() {
@@ -234,6 +256,13 @@ void os::Bsd::initialize_system_info() {
   } else {
     set_processor_count(1);   // fallback
   }
+
+#ifdef __APPLE__
+  // initialize processor id map
+  for (int i = 0; i < processor_id_map_size; i++) {
+    processor_id_map[i] = processor_id_unassigned;
+  }
+#endif
 
   // get physical memory via hw.memsize sysctl (hw.memsize is used
   // since it returns a 64 bit value)
@@ -619,19 +648,6 @@ extern "C" objc_registerThreadWithCollector_t objc_registerThreadWithCollectorFu
 objc_registerThreadWithCollector_t objc_registerThreadWithCollectorFunction = NULL;
 #endif
 
-#ifdef __APPLE__
-static uint64_t locate_unique_thread_id(mach_port_t mach_thread_port) {
-  // Additional thread_id used to correlate threads in SA
-  thread_identifier_info_data_t     m_ident_info;
-  mach_msg_type_number_t            count = THREAD_IDENTIFIER_INFO_COUNT;
-
-  thread_info(mach_thread_port, THREAD_IDENTIFIER_INFO,
-              (thread_info_t) &m_ident_info, &count);
-
-  return m_ident_info.thread_id;
-}
-#endif
-
 // Thread start routine for all newly created threads
 static void *thread_native_entry(Thread *thread) {
 
@@ -657,10 +673,10 @@ static void *thread_native_entry(Thread *thread) {
     os::current_thread_id(), (uintx) pthread_self());
 
 #ifdef __APPLE__
-  uint64_t unique_thread_id = locate_unique_thread_id(osthread->thread_id());
-  guarantee(unique_thread_id != 0, "unique thread id was not found");
-  osthread->set_unique_thread_id(unique_thread_id);
+  // Store unique OS X thread id used by SA
+  osthread->set_unique_thread_id();
 #endif
+
   // initialize signal mask for this thread
   os::Bsd::hotspot_sigmask(thread);
 
@@ -808,12 +824,12 @@ bool os::create_attached_thread(JavaThread* thread) {
 
   osthread->set_thread_id(os::Bsd::gettid());
 
-  // Store pthread info into the OSThread
 #ifdef __APPLE__
-  uint64_t unique_thread_id = locate_unique_thread_id(osthread->thread_id());
-  guarantee(unique_thread_id != 0, "just checking");
-  osthread->set_unique_thread_id(unique_thread_id);
+  // Store unique OS X thread id used by SA
+  osthread->set_unique_thread_id();
 #endif
+
+  // Store pthread info into the OSThread
   osthread->set_pthread_id(::pthread_self());
 
   // initialize floating point control register
@@ -931,7 +947,7 @@ jlong os::javaTimeNanos() {
   if (now <= prev) {
     return prev;   // same or retrograde time;
   }
-  const uint64_t obsv = Atomic::cmpxchg(now, &Bsd::_max_abstime, prev);
+  const uint64_t obsv = Atomic::cmpxchg(&Bsd::_max_abstime, prev, now);
   assert(obsv >= prev, "invariant");   // Monotonicity
   // If the CAS succeeded then we're done and return "now".
   // If the CAS failed and the observed value "obsv" is >= now then
@@ -1054,14 +1070,6 @@ void os::shutdown() {
 void os::abort(bool dump_core, void* siginfo, const void* context) {
   os::shutdown();
   if (dump_core) {
-#ifndef PRODUCT
-    fdStream out(defaultStream::output_fd());
-    out.print_raw("Current thread is ");
-    char buf[16];
-    jio_snprintf(buf, sizeof(buf), UINTX_FORMAT, os::current_thread_id());
-    out.print_raw_cr(buf);
-    out.print_raw_cr("Dumping core ...");
-#endif
     ::abort(); // dump core
   }
 
@@ -1085,12 +1093,11 @@ void os::die() {
 pid_t os::Bsd::gettid() {
   int retval = -1;
 
-#ifdef __APPLE__ //XNU kernel
-  // despite the fact mach port is actually not a thread id use it
-  // instead of syscall(SYS_thread_selfid) as it certainly fits to u4
-  retval = ::pthread_mach_thread_np(::pthread_self());
-  guarantee(retval != 0, "just checking");
-  return retval;
+#ifdef __APPLE__ // XNU kernel
+  mach_port_t port = mach_thread_self();
+  guarantee(MACH_PORT_VALID(port), "just checking");
+  mach_port_deallocate(mach_task_self(), port);
+  return (pid_t)port;
 
 #else
   #ifdef __FreeBSD__
@@ -1113,7 +1120,7 @@ pid_t os::Bsd::gettid() {
 
 intx os::current_thread_id() {
 #ifdef __APPLE__
-  return (intx)::pthread_mach_thread_np(::pthread_self());
+  return (intx)os::Bsd::gettid();
 #else
   return (intx)::pthread_self();
 #endif
@@ -1570,9 +1577,13 @@ void os::print_os_info(outputStream* st) {
 
   os::Posix::print_uname_info(st);
 
+  os::Bsd::print_uptime_info(st);
+
   os::Posix::print_rlimit_info(st);
 
   os::Posix::print_load_average(st);
+
+  VM_Version::print_platform_virtualization_info(st);
 }
 
 void os::pd_print_cpu_info(outputStream* st, char* buf, size_t buflen) {
@@ -1834,7 +1845,7 @@ static int check_pending_signals() {
   for (;;) {
     for (int i = 0; i < NSIG + 1; i++) {
       jint n = pending_signals[i];
-      if (n > 0 && n == Atomic::cmpxchg(n - 1, &pending_signals[i], n)) {
+      if (n > 0 && n == Atomic::cmpxchg(&pending_signals[i], n, n - 1)) {
         return i;
       }
     }
@@ -1895,7 +1906,7 @@ void bsd_wrap_code(char* base, size_t size) {
   }
 
   char buf[PATH_MAX + 1];
-  int num = Atomic::add(1, &cnt);
+  int num = Atomic::add(&cnt, 1);
 
   snprintf(buf, PATH_MAX + 1, "%s/hs-vm-%d-%d",
            os::get_temp_directory(), os::current_process_id(), num);
@@ -2002,6 +2013,10 @@ size_t os::numa_get_leaf_groups(int *ids, size_t size) {
     ids[0] = 0;
     return 1;
   }
+  return 0;
+}
+
+int os::numa_get_group_id_for_address(const void* address) {
   return 0;
 }
 
@@ -2126,12 +2141,12 @@ void os::large_page_init() {
 }
 
 
-char* os::reserve_memory_special(size_t bytes, size_t alignment, char* req_addr, bool exec) {
+char* os::pd_reserve_memory_special(size_t bytes, size_t alignment, char* req_addr, bool exec) {
   fatal("os::reserve_memory_special should not be called on BSD.");
   return NULL;
 }
 
-bool os::release_memory_special(char* base, size_t bytes) {
+bool os::pd_release_memory_special(char* base, size_t bytes) {
   fatal("os::release_memory_special should not be called on BSD.");
   return false;
 }
@@ -2270,7 +2285,7 @@ int os::java_to_os_priority[CriticalPriority + 1] = {
 static int prio_init() {
   if (ThreadPriorityPolicy == 1) {
     if (geteuid() != 0) {
-      if (!FLAG_IS_DEFAULT(ThreadPriorityPolicy)) {
+      if (!FLAG_IS_DEFAULT(ThreadPriorityPolicy) && !FLAG_IS_JIMAGE_RESOURCE(ThreadPriorityPolicy)) {
         warning("-XX:ThreadPriorityPolicy=1 may require system level permission, " \
                 "e.g., being the root user. If the necessary permission is not " \
                 "possessed, changes to priority will be silently ignored.");
@@ -3117,6 +3132,10 @@ jint os::init_2(void) {
     return JNI_ERR;
   }
 
+  // Not supported.
+  FLAG_SET_ERGO(UseNUMA, false);
+  FLAG_SET_ERGO(UseNUMAInterleaving, false);
+
   if (MaxFDLimit) {
     // set the number of file descriptors to max. print out error
     // if getrlimit/setrlimit fails but continue regardless.
@@ -3174,20 +3193,6 @@ jint os::init_2(void) {
   return JNI_OK;
 }
 
-// Mark the polling page as unreadable
-void os::make_polling_page_unreadable(void) {
-  if (!guard_memory((char*)_polling_page, Bsd::page_size())) {
-    fatal("Could not disable polling page");
-  }
-}
-
-// Mark the polling page as readable
-void os::make_polling_page_readable(void) {
-  if (!bsd_mprotect((char *)_polling_page, Bsd::page_size(), PROT_READ)) {
-    fatal("Could not enable polling page");
-  }
-}
-
 int os::active_processor_count() {
   // User has overridden the number of active processors
   if (ActiveProcessorCount > 0) {
@@ -3202,65 +3207,36 @@ int os::active_processor_count() {
 
 #ifdef __APPLE__
 uint os::processor_id() {
-  static volatile int* volatile apic_to_cpu_mapping = NULL;
-  static volatile int next_cpu_id = 0;
-
-  volatile int* mapping = OrderAccess::load_acquire(&apic_to_cpu_mapping);
-  if (mapping == NULL) {
-    // Calculate possible number space for APIC ids. This space is not necessarily
-    // in the range [0, number_of_cpus).
-    uint total_bits = 0;
-    for (uint i = 0;; ++i) {
-      uint eax = 0xb; // Query topology leaf
-      uint ebx;
-      uint ecx = i;
-      uint edx;
-
-      __asm__ ("cpuid\n\t" : "+a" (eax), "+b" (ebx), "+c" (ecx), "+d" (edx) : );
-
-      uint level_type = (ecx >> 8) & 0xFF;
-      if (level_type == 0) {
-        // Invalid level; end of topology
-        break;
-      }
-      uint level_apic_id_shift = eax & ((1u << 5) - 1);
-      total_bits += level_apic_id_shift;
-    }
-
-    uint max_apic_ids = 1u << total_bits;
-    mapping = NEW_C_HEAP_ARRAY(int, max_apic_ids, mtInternal);
-
-    for (uint i = 0; i < max_apic_ids; ++i) {
-      mapping[i] = -1;
-    }
-
-    if (!Atomic::replace_if_null(mapping, &apic_to_cpu_mapping)) {
-      FREE_C_HEAP_ARRAY(int, mapping);
-      mapping = OrderAccess::load_acquire(&apic_to_cpu_mapping);
-    }
-  }
-
-  uint eax = 0xb;
+  // Get the initial APIC id and return the associated processor id. The initial APIC
+  // id is limited to 8-bits, which means we can have at most 256 unique APIC ids. If
+  // the system has more processors (or the initial APIC ids are discontiguous) the
+  // APIC id will be truncated and more than one processor will potentially share the
+  // same processor id. This is not optimal, but unlikely to happen in practice. Should
+  // this become a real problem we could switch to using x2APIC ids, which are 32-bit
+  // wide. However, note that x2APIC is Intel-specific, and the wider number space
+  // would require a more complicated mapping approach.
+  uint eax = 0x1;
   uint ebx;
   uint ecx = 0;
   uint edx;
 
-  asm ("cpuid\n\t" : "+a" (eax), "+b" (ebx), "+c" (ecx), "+d" (edx) : );
+  __asm__ ("cpuid\n\t" : "+a" (eax), "+b" (ebx), "+c" (ecx), "+d" (edx) : );
 
-  // Map from APIC id to a unique logical processor ID in the expected
-  // [0, num_processors) range.
+  uint apic_id = (ebx >> 24) & (processor_id_map_size - 1);
+  int processor_id = Atomic::load(&processor_id_map[apic_id]);
 
-  uint apic_id = edx;
-  int cpu_id = Atomic::load(&mapping[apic_id]);
-
-  while (cpu_id < 0) {
-    if (Atomic::cmpxchg(-2, &mapping[apic_id], -1)) {
-      Atomic::store(Atomic::add(1, &next_cpu_id) - 1, &mapping[apic_id]);
+  while (processor_id < 0) {
+    // Assign processor id to APIC id
+    processor_id = Atomic::cmpxchg(&processor_id_map[apic_id], processor_id_unassigned, processor_id_assigning);
+    if (processor_id == processor_id_unassigned) {
+      processor_id = Atomic::fetch_and_add(&processor_id_next, 1) % os::processor_count();
+      Atomic::store(&processor_id_map[apic_id], processor_id);
     }
-    cpu_id = Atomic::load(&mapping[apic_id]);
   }
 
-  return (uint)cpu_id;
+  assert(processor_id >= 0 && processor_id < os::processor_count(), "invalid processor id");
+
+  return (uint)processor_id;
 }
 #endif
 
@@ -3752,11 +3728,30 @@ int os::fork_and_exec(char* cmd, bool use_vfork_if_available) {
   }
 }
 
-// Get the default path to the core file
+// Get the kern.corefile setting, or otherwise the default path to the core file
 // Returns the length of the string
 int os::get_core_path(char* buffer, size_t bufferSize) {
-  int n = jio_snprintf(buffer, bufferSize, "/cores/core.%d", current_process_id());
+  int n = 0;
+#ifdef __APPLE__
+  char coreinfo[MAX_PATH];
+  size_t sz = sizeof(coreinfo);
+  int ret = sysctlbyname("kern.corefile", coreinfo, &sz, NULL, 0);
+  if (ret == 0) {
+    char *pid_pos = strstr(coreinfo, "%P");
+    // skip over the "%P" to preserve any optional custom user pattern
+    const char* tail = (pid_pos != NULL) ? (pid_pos + 2) : "";
 
+    if (pid_pos != NULL) {
+      *pid_pos = '\0';
+      n = jio_snprintf(buffer, bufferSize, "%s%d%s", coreinfo, os::current_process_id(), tail);
+    } else {
+      n = jio_snprintf(buffer, bufferSize, "%s", coreinfo);
+    }
+  } else
+#endif
+  {
+    n = jio_snprintf(buffer, bufferSize, "/cores/core.%d", os::current_process_id());
+  }
   // Truncate if theoretical string was longer than bufferSize
   n = MIN2(n, (int)bufferSize);
 

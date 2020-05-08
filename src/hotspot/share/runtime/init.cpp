@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -35,11 +35,11 @@
 #include "logging/logTag.hpp"
 #include "memory/universe.hpp"
 #include "prims/methodHandles.hpp"
+#include "runtime/atomic.hpp"
 #include "runtime/flags/jvmFlag.hpp"
 #include "runtime/handles.inline.hpp"
 #include "runtime/icache.hpp"
 #include "runtime/init.hpp"
-#include "runtime/orderAccess.hpp"
 #include "runtime/safepoint.hpp"
 #include "runtime/sharedRuntime.hpp"
 #include "services/memTracker.hpp"
@@ -69,12 +69,11 @@ void gc_barrier_stubs_init();
 void interpreter_init();       // before any methods loaded
 void invocationCounter_init(); // before any methods loaded
 void accessFlags_init();
-void templateTable_init();
 void InterfaceSupport_init();
 void universe2_init();  // dependent on codeCache_init and stubRoutines_init, loads primordial classes
 void referenceProcessor_init();
 void jni_handles_init();
-void vmStructs_init();
+void vmStructs_init() NOT_DEBUG_RETURN;
 
 void vtableStubs_init();
 void InlineCacheBuffer_init();
@@ -123,7 +122,6 @@ jint init_globals() {
   interpreter_init();        // before any methods loaded
   invocationCounter_init();  // before any methods loaded
   accessFlags_init();
-  templateTable_init();
   InterfaceSupport_init();
   VMRegImpl::set_regName();  // need this before generate_stubs (for printing oop maps).
   SharedRuntime::generate_stubs();
@@ -195,7 +193,7 @@ void exit_globals() {
 static volatile bool _init_completed = false;
 
 bool is_init_completed() {
-  return OrderAccess::load_acquire(&_init_completed);
+  return Atomic::load_acquire(&_init_completed);
 }
 
 void wait_init_completed() {
@@ -208,6 +206,6 @@ void wait_init_completed() {
 void set_init_completed() {
   assert(Universe::is_fully_initialized(), "Should have completed initialization");
   MonitorLocker ml(InitCompleted_lock, Monitor::_no_safepoint_check_flag);
-  OrderAccess::release_store(&_init_completed, true);
+  Atomic::release_store(&_init_completed, true);
   ml.notify_all();
 }

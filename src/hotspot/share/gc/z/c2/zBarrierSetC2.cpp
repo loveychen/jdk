@@ -28,6 +28,7 @@
 #include "gc/z/zBarrierSetAssembler.hpp"
 #include "gc/z/zBarrierSetRuntime.hpp"
 #include "opto/arraycopynode.hpp"
+#include "opto/addnode.hpp"
 #include "opto/block.hpp"
 #include "opto/compile.hpp"
 #include "opto/graphKit.hpp"
@@ -35,6 +36,7 @@
 #include "opto/macro.hpp"
 #include "opto/memnode.hpp"
 #include "opto/node.hpp"
+#include "opto/output.hpp"
 #include "opto/regalloc.hpp"
 #include "opto/rootnode.hpp"
 #include "opto/type.hpp"
@@ -84,7 +86,7 @@ static ZBarrierSetC2State* barrier_set_state() {
 
 ZLoadBarrierStubC2* ZLoadBarrierStubC2::create(const MachNode* node, Address ref_addr, Register ref, Register tmp, bool weak) {
   ZLoadBarrierStubC2* const stub = new (Compile::current()->comp_arena()) ZLoadBarrierStubC2(node, ref_addr, ref, tmp, weak);
-  if (!Compile::current()->in_scratch_emit_size()) {
+  if (!Compile::current()->output()->in_scratch_emit_size()) {
     barrier_set_state()->stubs()->append(stub);
   }
 
@@ -129,7 +131,7 @@ Label* ZLoadBarrierStubC2::entry() {
   // However, we still need to return a label that is not bound now, but
   // will eventually be bound. Any lable will do, as it will only act as
   // a placeholder, so we return the _continuation label.
-  return Compile::current()->in_scratch_emit_size() ? &_continuation : &_entry;
+  return Compile::current()->output()->in_scratch_emit_size() ? &_continuation : &_entry;
 }
 
 Label* ZLoadBarrierStubC2::continuation() {
@@ -151,7 +153,7 @@ void ZBarrierSetC2::emit_stubs(CodeBuffer& cb) const {
 
   for (int i = 0; i < stubs->length(); i++) {
     // Make sure there is enough space in the code buffer
-    if (cb.insts()->maybe_expand_to_ensure_remaining(Compile::MAX_inst_size) && cb.blob() == NULL) {
+    if (cb.insts()->maybe_expand_to_ensure_remaining(PhaseOutput::MAX_inst_size) && cb.blob() == NULL) {
       ciEnv::current()->record_failure("CodeCache is full");
       return;
     }
@@ -164,12 +166,12 @@ void ZBarrierSetC2::emit_stubs(CodeBuffer& cb) const {
 
 int ZBarrierSetC2::estimate_stub_size() const {
   Compile* const C = Compile::current();
-  BufferBlob* const blob = C->scratch_buffer_blob();
+  BufferBlob* const blob = C->output()->scratch_buffer_blob();
   GrowableArray<ZLoadBarrierStubC2*>* const stubs = barrier_set_state()->stubs();
   int size = 0;
 
   for (int i = 0; i < stubs->length(); i++) {
-    CodeBuffer cb(blob->content_begin(), (address)C->scratch_locs_memory() - blob->content_begin());
+    CodeBuffer cb(blob->content_begin(), (address)C->output()->scratch_locs_memory() - blob->content_begin());
     MacroAssembler masm(&cb);
     ZBarrierSet::assembler()->generate_c2_load_barrier_stub(&masm, stubs->at(i));
     size += cb.insts_size();
@@ -215,13 +217,15 @@ bool ZBarrierSetC2::array_copy_requires_gc_barriers(bool tightly_coupled_alloc, 
   return type == T_OBJECT || type == T_ARRAY;
 }
 
+// This TypeFunc assumes a 64bit system
 static const TypeFunc* clone_type() {
   // Create input type (domain)
-  const Type** domain_fields = TypeTuple::fields(3);
+  const Type** domain_fields = TypeTuple::fields(4);
   domain_fields[TypeFunc::Parms + 0] = TypeInstPtr::NOTNULL;  // src
   domain_fields[TypeFunc::Parms + 1] = TypeInstPtr::NOTNULL;  // dst
-  domain_fields[TypeFunc::Parms + 2] = TypeInt::INT;          // size
-  const TypeTuple* domain = TypeTuple::make(TypeFunc::Parms + 3, domain_fields);
+  domain_fields[TypeFunc::Parms + 2] = TypeLong::LONG;        // size lower
+  domain_fields[TypeFunc::Parms + 3] = Type::HALF;            // size upper
+  const TypeTuple* domain = TypeTuple::make(TypeFunc::Parms + 4, domain_fields);
 
   // Create result type (range)
   const Type** range_fields = TypeTuple::fields(0);
@@ -232,25 +236,25 @@ static const TypeFunc* clone_type() {
 
 void ZBarrierSetC2::clone_at_expansion(PhaseMacroExpand* phase, ArrayCopyNode* ac) const {
   Node* const src = ac->in(ArrayCopyNode::Src);
-
-  if (src->bottom_type()->isa_aryptr()) {
+  if (ac->is_clone_array()) {
     // Clone primitive array
     BarrierSetC2::clone_at_expansion(phase, ac);
     return;
   }
 
   // Clone instance
-  Node* const ctrl = ac->in(TypeFunc::Control);
-  Node* const mem = ac->in(TypeFunc::Memory);
-  Node* const dst = ac->in(ArrayCopyNode::Dest);
-  Node* const src_offset = ac->in(ArrayCopyNode::SrcPos);
-  Node* const dst_offset = ac->in(ArrayCopyNode::DestPos);
-  Node* const size = ac->in(ArrayCopyNode::Length);
+  Node* const ctrl       = ac->in(TypeFunc::Control);
+  Node* const mem        = ac->in(TypeFunc::Memory);
+  Node* const dst        = ac->in(ArrayCopyNode::Dest);
+  Node* const size       = ac->in(ArrayCopyNode::Length);
 
-  assert(src->bottom_type()->isa_instptr(), "Should be an instance");
-  assert(dst->bottom_type()->isa_instptr(), "Should be an instance");
-  assert(src_offset == NULL, "Should be null");
-  assert(dst_offset == NULL, "Should be null");
+  assert(ac->is_clone_inst(), "Sanity check");
+  assert(size->bottom_type()->is_long(), "Should be long");
+
+  // The native clone we are calling here expects the instance size in words
+  // Add header/offset size to payload size to get instance size.
+  Node* const base_offset = phase->longcon(arraycopy_payload_base_offset(false) >> LogBytesPerLong);
+  Node* const full_size = phase->transform_later(new AddLNode(size, base_offset));
 
   Node* const call = phase->make_leaf_call(ctrl,
                                            mem,
@@ -260,7 +264,8 @@ void ZBarrierSetC2::clone_at_expansion(PhaseMacroExpand* phase, ArrayCopyNode* a
                                            TypeRawPtr::BOTTOM,
                                            src,
                                            dst,
-                                           size);
+                                           full_size,
+                                           phase->top());
   phase->transform_later(call);
   phase->igvn().replace_node(ac, call);
 }
@@ -342,7 +347,7 @@ void ZBarrierSetC2::analyze_dominating_barriers() const {
       MachNode* mem = mem_ops.at(j)->as_Mach();
       const TypePtr* mem_adr_type = NULL;
       intptr_t mem_offset = 0;
-      const Node* mem_obj = mem_obj = mem->get_base_and_disp(mem_offset, mem_adr_type);
+      const Node* mem_obj = mem->get_base_and_disp(mem_offset, mem_adr_type);
       Block* mem_block = cfg->get_block_for_node(mem);
       uint mem_index = block_index(mem_block, mem);
 

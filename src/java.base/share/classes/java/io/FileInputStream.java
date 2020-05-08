@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1994, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1994, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -52,7 +52,6 @@ import sun.nio.ch.FileChannelImpl;
  * called when the FileInputStream is unreachable.
  * Otherwise, it is implementation specific how the resource cleanup described in
  * {@link #close} is performed.
-
  *
  * @author  Arthur van Hoff
  * @see     java.io.File
@@ -61,8 +60,7 @@ import sun.nio.ch.FileChannelImpl;
  * @see     java.nio.file.Files#newInputStream
  * @since   1.0
  */
-public
-class FileInputStream extends InputStream
+public class FileInputStream extends InputStream
 {
     /* File Descriptor - handle to the open file */
     private final FileDescriptor fd;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -34,6 +34,7 @@
 #include "memory/allocation.hpp"
 
 class ZPageAllocRequest;
+class ZWorkers;
 
 class ZPageAllocator {
   friend class VMStructs;
@@ -61,7 +62,7 @@ private:
 
   static ZPage* const gc_marker;
 
-  void prime_cache(size_t size);
+  void prime_cache(ZWorkers* workers, size_t size);
 
   void increase_used(size_t size, bool relocation);
   void decrease_used(size_t size, bool reclaimed);
@@ -80,13 +81,14 @@ private:
   ZPage* alloc_page_blocking(uint8_t type, size_t size, ZAllocationFlags flags);
   ZPage* alloc_page_nonblocking(uint8_t type, size_t size, ZAllocationFlags flags);
 
-  size_t flush_cache(ZPageCacheFlushClosure* cl);
+  size_t flush_cache(ZPageCacheFlushClosure* cl, bool for_allocation);
   void flush_cache_for_allocation(size_t requested);
 
   void satisfy_alloc_queue();
 
 public:
-  ZPageAllocator(size_t min_capacity,
+  ZPageAllocator(ZWorkers* workers,
+                 size_t min_capacity,
                  size_t initial_capacity,
                  size_t max_capacity,
                  size_t max_reserve);

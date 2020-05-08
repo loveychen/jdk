@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,6 +24,7 @@
 
 #include "precompiled.hpp"
 #include "classfile/classLoaderData.inline.hpp"
+#include "classfile/javaClasses.inline.hpp"
 #include "classfile/symbolTable.hpp"
 #include "jfr/recorder/checkpoint/types/traceid/jfrTraceId.inline.hpp"
 #include "jfr/utilities/jfrTypes.hpp"
@@ -46,7 +47,7 @@ static traceid atomic_inc(traceid volatile* const dest) {
   do {
     compare_value = *dest;
     exchange_value = compare_value + 1;
-  } while (Atomic::cmpxchg(exchange_value, dest, compare_value) != compare_value);
+  } while (Atomic::cmpxchg(dest, compare_value, exchange_value) != compare_value);
   return exchange_value;
 }
 
@@ -140,7 +141,7 @@ void JfrTraceId::assign(const PackageEntry* package) {
 
 void JfrTraceId::assign(const ClassLoaderData* cld) {
   assert(cld != NULL, "invariant");
-  if (cld->is_unsafe_anonymous()) {
+  if (cld->has_class_mirror_holder()) {
     cld->set_trace_id(0);
     return;
   }

@@ -134,7 +134,7 @@ class DynamicArchiveTestBase {
      * Dump the base archive. The JDK's default class list is used (unless otherwise specified
      * in cmdLineSuffix).
      */
-    public static void dumpBaseArchive(String baseArchiveName, String ... cmdLineSuffix)
+    public static OutputAnalyzer dumpBaseArchive(String baseArchiveName, String ... cmdLineSuffix)
         throws Exception
     {
         CDSOptions opts = new CDSOptions();
@@ -143,6 +143,7 @@ class DynamicArchiveTestBase {
         opts.addSuffix("-Djava.class.path=");
         OutputAnalyzer out = CDSTestUtils.createArchive(opts);
         CDSTestUtils.checkDump(out);
+        return out;
     }
 
     /**
@@ -241,7 +242,7 @@ class DynamicArchiveTestBase {
         if (!executedIn_run) {
             throw new Exception("Test error: dynamic archive tests must be executed via DynamicArchiveTestBase.run()");
         }
-        ProcessBuilder pb = ProcessTools.createJavaProcessBuilder(true, cmdLine);
+        ProcessBuilder pb = ProcessTools.createTestJvm(cmdLine);
         if (jarDir != null) {
             pb.directory(new File(jarDir));
         }

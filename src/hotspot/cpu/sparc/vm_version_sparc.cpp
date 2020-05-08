@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -32,7 +32,7 @@
 #include "runtime/java.hpp"
 #include "runtime/os.hpp"
 #include "runtime/stubCodeGenerator.hpp"
-#include "vm_version_sparc.hpp"
+#include "runtime/vm_version.hpp"
 
 #include <sys/mman.h>
 
@@ -67,8 +67,6 @@ void VM_Version::initialize() {
       FLAG_SET_DEFAULT(AllocatePrefetchInstr, 0);
     }
   }
-
-  UseSSE = false;                   // Only used on x86 and x64.
 
   _supports_cx8 = true;             // All SPARC V9 implementations.
   _supports_atomic_getset4 = true;  // Using the 'swap' instruction.

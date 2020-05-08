@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -539,13 +539,6 @@ void os::breakpoint() {
   BREAKPOINT;
 }
 
-bool os::Solaris::valid_stack_address(Thread* thread, address sp) {
-  address  stackStart  = (address)thread->stack_base();
-  address  stackEnd    = (address)(stackStart - (address)thread->stack_size());
-  if (sp < stackStart && sp >= stackEnd) return true;
-  return false;
-}
-
 extern "C" void breakpoint() {
   // use debugger to set breakpoint here
 }
@@ -1024,7 +1017,7 @@ inline hrtime_t getTimeNanos() {
   if (now <= prev) {
     return prev;   // same or retrograde time;
   }
-  const hrtime_t obsv = Atomic::cmpxchg(now, &max_hrtime, prev);
+  const hrtime_t obsv = Atomic::cmpxchg(&max_hrtime, prev, now);
   assert(obsv >= prev, "invariant");   // Monotonicity
   // If the CAS succeeded then we're done and return "now".
   // If the CAS failed and the observed value "obsv" is >= now then
@@ -1154,14 +1147,6 @@ void os::shutdown() {
 void os::abort(bool dump_core, void* siginfo, const void* context) {
   os::shutdown();
   if (dump_core) {
-#ifndef PRODUCT
-    fdStream out(defaultStream::output_fd());
-    out.print_raw("Current thread is ");
-    char buf[16];
-    jio_snprintf(buf, sizeof(buf), UINTX_FORMAT, os::current_thread_id());
-    out.print_raw_cr(buf);
-    out.print_raw_cr("Dumping core ...");
-#endif
     ::abort(); // dump core (for debugging)
   }
 
@@ -1432,10 +1417,6 @@ void * os::dll_load(const char *filename, char *ebuf, int ebuflen) {
     char*         name;         // String representation
   } arch_t;
 
-#ifndef EM_AARCH64
-  #define EM_AARCH64    183               /* ARM AARCH64 */
-#endif
-
   static const arch_t arch_array[]={
     {EM_386,         EM_386,     ELFCLASS32, ELFDATA2LSB, (char*)"IA 32"},
     {EM_486,         EM_386,     ELFCLASS32, ELFDATA2LSB, (char*)"IA 32"},
@@ -1583,6 +1564,8 @@ void os::print_os_info(outputStream* st) {
   os::Solaris::print_distro_info(st);
 
   os::Posix::print_uname_info(st);
+
+  os::Posix::print_uptime_info(st);
 
   os::Solaris::print_libversion_info(st);
 
@@ -1984,7 +1967,7 @@ static int check_pending_signals() {
   while (true) {
     for (int i = 0; i < Sigexit + 1; i++) {
       jint n = pending_signals[i];
-      if (n > 0 && n == Atomic::cmpxchg(n - 1, &pending_signals[i], n)) {
+      if (n > 0 && n == Atomic::cmpxchg(&pending_signals[i], n, n - 1)) {
         return i;
       }
     }
@@ -2072,7 +2055,7 @@ int os::Solaris::commit_memory_impl(char* addr, size_t bytes, bool exec) {
   char *res = Solaris::mmap_chunk(addr, size, MAP_PRIVATE|MAP_FIXED, prot);
   if (res != NULL) {
     if (UseNUMAInterleaving) {
-      numa_make_global(addr, bytes);
+        numa_make_global(addr, bytes);
     }
     return 0;
   }
@@ -2265,6 +2248,10 @@ int os::numa_get_group_id() {
     return 0;
   }
   return ids[os::random() % r];
+}
+
+int os::numa_get_group_id_for_address(const void* address) {
+  return 0;
 }
 
 // Request information about the page.
@@ -2607,12 +2594,12 @@ bool os::Solaris::setup_large_pages(caddr_t start, size_t bytes, size_t align) {
   return true;
 }
 
-char* os::reserve_memory_special(size_t size, size_t alignment, char* addr, bool exec) {
+char* os::pd_reserve_memory_special(size_t size, size_t alignment, char* addr, bool exec) {
   fatal("os::reserve_memory_special should not be called on Solaris.");
   return NULL;
 }
 
-bool os::release_memory_special(char* base, size_t bytes) {
+bool os::pd_release_memory_special(char* base, size_t bytes) {
   fatal("os::release_memory_special should not be called on Solaris.");
   return false;
 }
@@ -3921,20 +3908,23 @@ jint os::init_2(void) {
 
   if (UseNUMA) {
     if (!Solaris::liblgrp_init()) {
-      UseNUMA = false;
+      FLAG_SET_ERGO(UseNUMA, false);
     } else {
       size_t lgrp_limit = os::numa_get_groups_num();
       int *lgrp_ids = NEW_C_HEAP_ARRAY(int, lgrp_limit, mtInternal);
       size_t lgrp_num = os::numa_get_leaf_groups(lgrp_ids, lgrp_limit);
       FREE_C_HEAP_ARRAY(int, lgrp_ids);
       if (lgrp_num < 2) {
-        // There's only one locality group, disable NUMA.
-        UseNUMA = false;
+        // There's only one locality group, disable NUMA unless
+        // user explicilty forces NUMA optimizations on single-node/UMA systems
+        UseNUMA = ForceNUMA;
       }
     }
-    if (!UseNUMA && ForceNUMA) {
-      UseNUMA = true;
-    }
+  }
+
+  // When NUMA requested, not-NUMA-aware allocations default to interleaving.
+  if (UseNUMA && !UseNUMAInterleaving) {
+    FLAG_SET_ERGO_IF_DEFAULT(UseNUMAInterleaving, true);
   }
 
   Solaris::signal_sets_init();
@@ -4008,22 +3998,6 @@ jint os::init_2(void) {
   os::Posix::init_2();
 
   return JNI_OK;
-}
-
-// Mark the polling page as unreadable
-void os::make_polling_page_unreadable(void) {
-  Events::log(NULL, "Protecting polling page " INTPTR_FORMAT " with PROT_NONE", p2i(_polling_page));
-  if (mprotect((char *)_polling_page, page_size, PROT_NONE) != 0) {
-    fatal("Could not disable polling page");
-  }
-}
-
-// Mark the polling page as readable
-void os::make_polling_page_readable(void) {
-  Events::log(NULL, "Protecting polling page " INTPTR_FORMAT " with PROT_READ", p2i(_polling_page));
-  if (mprotect((char *)_polling_page, page_size, PROT_READ) != 0) {
-    fatal("Could not enable polling page");
-  }
 }
 
 // Is a (classpath) directory empty?
@@ -4706,7 +4680,7 @@ void os::PlatformEvent::park() {           // AKA: down()
   int v;
   for (;;) {
     v = _Event;
-    if (Atomic::cmpxchg(v-1, &_Event, v) == v) break;
+    if (Atomic::cmpxchg(&_Event, v, v-1) == v) break;
   }
   guarantee(v >= 0, "invariant");
   if (v == 0) {
@@ -4744,7 +4718,7 @@ int os::PlatformEvent::park(jlong millis) {
   int v;
   for (;;) {
     v = _Event;
-    if (Atomic::cmpxchg(v-1, &_Event, v) == v) break;
+    if (Atomic::cmpxchg(&_Event, v, v-1) == v) break;
   }
   guarantee(v >= 0, "invariant");
   if (v != 0) return OS_OK;
@@ -4793,7 +4767,7 @@ void os::PlatformEvent::unpark() {
   // from the first park() call after an unpark() call which will help
   // shake out uses of park() and unpark() without condition variables.
 
-  if (Atomic::xchg(1, &_Event) >= 0) return;
+  if (Atomic::xchg(&_Event, 1) >= 0) return;
 
   // If the thread associated with the event was parked, wake it.
   // Wait for the thread assoc with the PlatformEvent to vacate.
@@ -4892,7 +4866,7 @@ void Parker::park(bool isAbsolute, jlong time) {
   // Return immediately if a permit is available.
   // We depend on Atomic::xchg() having full barrier semantics
   // since we are doing a lock-free update to _counter.
-  if (Atomic::xchg(0, &_counter) > 0) return;
+  if (Atomic::xchg(&_counter, 0) > 0) return;
 
   // Optional fast-exit: Check interrupt before trying to wait
   Thread* thread = Thread::current();
@@ -4921,10 +4895,12 @@ void Parker::park(bool isAbsolute, jlong time) {
   // the ThreadBlockInVM() CTOR and DTOR may grab Threads_lock.
   ThreadBlockInVM tbivm(jt);
 
+  // Can't access interrupt state now that we are _thread_blocked. If we've
+  // been interrupted since we checked above then _counter will be > 0.
+
   // Don't wait if cannot get lock since interference arises from
-  // unblocking.  Also. check interrupt before trying wait
-  if (jt->is_interrupted(false) ||
-      os::Solaris::mutex_trylock(_mutex) != 0) {
+  // unblocking.
+  if (os::Solaris::mutex_trylock(_mutex) != 0) {
     return;
   }
 

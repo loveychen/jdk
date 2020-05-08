@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -58,8 +58,7 @@
                  product_rw,                                                \
                  lp64_product,                                              \
                  range,                                                     \
-                 constraint,                                                \
-                 writeable)                                                 \
+                 constraint)                                                \
                                                                             \
   EPSILONGC_ONLY(GC_EPSILON_FLAGS(                                          \
     develop,                                                                \
@@ -74,8 +73,7 @@
     product_rw,                                                             \
     lp64_product,                                                           \
     range,                                                                  \
-    constraint,                                                             \
-    writeable))                                                             \
+    constraint))                                                            \
                                                                             \
   G1GC_ONLY(GC_G1_FLAGS(                                                    \
     develop,                                                                \
@@ -90,8 +88,7 @@
     product_rw,                                                             \
     lp64_product,                                                           \
     range,                                                                  \
-    constraint,                                                             \
-    writeable))                                                             \
+    constraint))                                                            \
                                                                             \
   PARALLELGC_ONLY(GC_PARALLEL_FLAGS(                                        \
     develop,                                                                \
@@ -106,8 +103,7 @@
     product_rw,                                                             \
     lp64_product,                                                           \
     range,                                                                  \
-    constraint,                                                             \
-    writeable))                                                             \
+    constraint))                                                            \
                                                                             \
   SERIALGC_ONLY(GC_SERIAL_FLAGS(                                            \
     develop,                                                                \
@@ -122,8 +118,7 @@
     product_rw,                                                             \
     lp64_product,                                                           \
     range,                                                                  \
-    constraint,                                                             \
-    writeable))                                                             \
+    constraint))                                                            \
                                                                             \
   SHENANDOAHGC_ONLY(GC_SHENANDOAH_FLAGS(                                    \
     develop,                                                                \
@@ -138,8 +133,7 @@
     product_rw,                                                             \
     lp64_product,                                                           \
     range,                                                                  \
-    constraint,                                                             \
-    writeable))                                                             \
+    constraint))                                                            \
                                                                             \
   ZGC_ONLY(GC_Z_FLAGS(                                                      \
     develop,                                                                \
@@ -154,8 +148,7 @@
     product_rw,                                                             \
     lp64_product,                                                           \
     range,                                                                  \
-    constraint,                                                             \
-    writeable))                                                             \
+    constraint))                                                            \
                                                                             \
   /* gc */                                                                  \
                                                                             \
@@ -166,15 +159,12 @@
           "Use the Garbage-First garbage collector")                        \
                                                                             \
   product(bool, UseParallelGC, false,                                       \
-          "Use the Parallel Scavenge garbage collector")                    \
-                                                                            \
-  product(bool, UseParallelOldGC, false,                                    \
-          "Use the Parallel Old garbage collector")                         \
+          "Use the Parallel garbage collector.")                            \
                                                                             \
   experimental(bool, UseEpsilonGC, false,                                   \
           "Use the Epsilon (no-op) garbage collector")                      \
                                                                             \
-  experimental(bool, UseZGC, false,                                         \
+  product(bool, UseZGC, false,                                              \
           "Use the Z garbage collector")                                    \
                                                                             \
   experimental(bool, UseShenandoahGC, false,                                \
@@ -197,10 +187,6 @@
              "Inject thread creation failures for "                         \
              "UseDynamicNumberOfGCThreads")                                 \
                                                                             \
-  diagnostic(bool, ForceDynamicNumberOfGCThreads, false,                    \
-          "Force dynamic selection of the number of "                       \
-          "parallel threads parallel gc will use to aid debugging")         \
-                                                                            \
   product(size_t, HeapSizePerGCThread, ScaleForWordSize(32*M),              \
           "Size of heap (bytes) per GC thread used in calculating the "     \
           "number of GC threads")                                           \
@@ -209,10 +195,6 @@
   product(uint, ConcGCThreads, 0,                                           \
           "Number of threads concurrent gc will use")                       \
           constraint(ConcGCThreadsConstraintFunc,AfterErgo)                 \
-                                                                            \
-  product(uint, GCTaskTimeStampEntries, 200,                                \
-          "Number of time stamp entries per gc worker thread")              \
-          range(1, max_jint)                                                \
                                                                             \
   product(bool, AlwaysTenure, false,                                        \
           "Always tenure objects in eden (ParallelGC only)")                \
@@ -227,10 +209,6 @@
   product(bool, ExplicitGCInvokesConcurrent, false,                         \
           "A System.gc() request invokes a concurrent collection; "         \
           "(effective only when using concurrent collectors)")              \
-                                                                            \
-  product(bool, GCLockerInvokesConcurrent, false,                           \
-          "The exit of a JNI critical section necessitating a scavenge, "   \
-          "also kicks off a background concurrent collection")              \
                                                                             \
   product(uintx, GCLockerEdenExpansionPercent, 5,                           \
           "How much the GC can expand the eden by while the GC locker "     \
@@ -280,6 +258,7 @@
   product(size_t, MarkStackSize, NOT_LP64(32*K) LP64_ONLY(4*M),             \
           "Size of marking stack")                                          \
           constraint(MarkStackSizeConstraintFunc,AfterErgo)                 \
+          range(1, (max_jint - 1))                                          \
                                                                             \
   product(intx, RefDiscoveryPolicy, 0,                                      \
           "Select type of reference discovery policy: "                     \
@@ -332,10 +311,6 @@
                                                                             \
   develop(uintx, PromotionFailureALotInterval, 5,                           \
           "Total collections between promotion failures a lot")             \
-                                                                            \
-  diagnostic(bool, UseOWSTTaskTerminator, true,                             \
-          "Use Optimized Work Stealing Threads task termination "           \
-          "protocol")                                                       \
                                                                             \
   experimental(uintx, WorkStealingSleepMillis, 1,                           \
           "Sleep time when sleep is used for yields")                       \
@@ -444,9 +419,6 @@
                                                                             \
   product(bool, UseAdaptiveSizePolicyWithSystemGC, false,                   \
           "Include statistics from System.gc() for adaptive size policy")   \
-                                                                            \
-  product(bool, UseAdaptiveGCBoundary, false,                               \
-          "Allow young-old boundary to move")                               \
                                                                             \
   develop(intx, PSAdaptiveSizePolicyResizeVirtualSpaceAlot, -1,             \
           "Resize the virtual spaces of the young or old generations")      \

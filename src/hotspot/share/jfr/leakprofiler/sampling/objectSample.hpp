@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -57,11 +57,6 @@ class ObjectSample : public JfrCHeapObj {
   size_t _allocated;
   size_t _heap_used_at_last_gc;
   unsigned int _stack_trace_hash;
-  bool _dead;
-
-  void set_dead() {
-    _dead = true;
-  }
 
   void release_references() {
     _stacktrace.~JfrBlobHandle();
@@ -70,10 +65,10 @@ class ObjectSample : public JfrCHeapObj {
   }
 
   void reset() {
+    _object = NULL;
     set_stack_trace_id(0);
     set_stack_trace_hash(0);
     release_references();
-    _dead = false;
   }
 
  public:
@@ -90,8 +85,7 @@ class ObjectSample : public JfrCHeapObj {
                    _span(0),
                    _allocated(0),
                    _heap_used_at_last_gc(0),
-                   _stack_trace_hash(0),
-                   _dead(false) {}
+                   _stack_trace_hash(0) {}
 
   ObjectSample* next() const {
     return _next;
@@ -110,24 +104,15 @@ class ObjectSample : public JfrCHeapObj {
   }
 
   bool is_dead() const {
-    return _dead;
+    return object() == NULL;
   }
 
-  const oop object() const {
-    return _object;
-  }
+  const oop object() const;
+  const oop object_raw() const;
+  void set_object(oop object);
 
   const oop* object_addr() const {
     return &_object;
-  }
-
-  void set_object(oop object) {
-    _object = object;
-  }
-
-  const Klass* klass() const {
-    assert(_object != NULL, "invariant");
-    return _object->klass();
   }
 
   int index() const {

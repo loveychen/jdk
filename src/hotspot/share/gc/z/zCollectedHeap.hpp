@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -98,7 +98,8 @@ public:
   virtual GrowableArray<MemoryPool*> memory_pools();
 
   virtual void object_iterate(ObjectClosure* cl);
-  virtual void safe_object_iterate(ObjectClosure* cl);
+
+  virtual void keep_alive(oop obj);
 
   virtual void register_nmethod(nmethod* nm);
   virtual void unregister_nmethod(nmethod* nm);
@@ -126,6 +127,7 @@ public:
   virtual void prepare_for_verify();
   virtual void verify(VerifyOption option /* ignored */);
   virtual bool is_oop(oop object) const;
+  virtual bool supports_concurrent_gc_breakpoints() const;
 };
 
 #endif // SHARE_GC_Z_ZCOLLECTEDHEAP_HPP

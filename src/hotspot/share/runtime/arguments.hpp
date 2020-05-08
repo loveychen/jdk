@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -481,6 +481,7 @@ class Arguments : AllStatic {
 
   static char*  SharedArchivePath;
   static char*  SharedDynamicArchivePath;
+  static size_t _SharedBaseAddress; // The default value specified in globals.hpp
   static int num_archives(const char* archive_path) NOT_CDS_RETURN_(0);
   static void extract_shared_archive_paths(const char* archive_path,
                                          char** base_archive_path,
@@ -563,7 +564,7 @@ class Arguments : AllStatic {
 
   static const char* GetSharedArchivePath() { return SharedArchivePath; }
   static const char* GetSharedDynamicArchivePath() { return SharedDynamicArchivePath; }
-
+  static size_t default_SharedBaseAddress() { return _SharedBaseAddress; }
   // Java launcher properties
   static void process_sun_java_launcher_properties(JavaVMInitArgs* args);
 
@@ -652,6 +653,8 @@ class Arguments : AllStatic {
   static void assert_is_dumping_archive() {
     assert(Arguments::is_dumping_archive(), "dump time only");
   }
+
+  DEBUG_ONLY(static bool verify_special_jvm_flags(bool check_globals);)
 };
 
 // Disable options not supported in this release, with a warning if they

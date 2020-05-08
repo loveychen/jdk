@@ -179,6 +179,14 @@ inline bool java_lang_invoke_CallSite::is_instance(oop obj) {
   return obj != NULL && is_subclass(obj->klass());
 }
 
+inline jboolean java_lang_invoke_ConstantCallSite::is_frozen(oop site) {
+  return site->bool_field(_is_frozen_offset);
+}
+
+inline bool java_lang_invoke_ConstantCallSite::is_instance(oop obj) {
+  return obj != NULL && is_subclass(obj->klass());
+}
+
 inline bool java_lang_invoke_MethodHandleNatives_CallSiteContext::is_instance(oop obj) {
   return obj != NULL && is_subclass(obj->klass());
 }
@@ -201,6 +209,14 @@ inline bool java_lang_invoke_MethodHandle::is_instance(oop obj) {
 
 inline bool java_lang_Class::is_instance(oop obj) {
   return obj != NULL && obj->klass() == SystemDictionary::Class_klass();
+}
+
+inline Klass* java_lang_Class::as_Klass(oop java_class) {
+  //%note memory_2
+  assert(java_lang_Class::is_instance(java_class), "must be a Class object");
+  Klass* k = ((Klass*)java_class->metadata_field(_klass_offset));
+  assert(k == NULL || k->is_klass(), "type check");
+  return k;
 }
 
 inline bool java_lang_Class::is_primitive(oop java_class) {

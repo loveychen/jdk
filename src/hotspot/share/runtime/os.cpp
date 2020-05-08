@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -492,7 +492,7 @@ void os::initialize_jdk_signal_support(TRAPS) {
                             thread_oop,
                             CHECK);
 
-    { MutexLocker mu(Threads_lock);
+    { MutexLocker mu(THREAD, Threads_lock);
       JavaThread* signal_thread = new JavaThread(&signal_thread_entry);
 
       // At this point it may be possible that no osthread was created for the
@@ -668,7 +668,7 @@ static bool has_reached_max_malloc_test_peak(size_t alloc_size) {
     if ((cur_malloc_words + words) > MallocMaxTestWords) {
       return true;
     }
-    Atomic::add(words, &cur_malloc_words);
+    Atomic::add(&cur_malloc_words, words);
   }
   return false;
 }
@@ -855,7 +855,7 @@ int os::random() {
   while (true) {
     unsigned int seed = _rand_seed;
     unsigned int rand = random_helper(seed);
-    if (Atomic::cmpxchg(rand, &_rand_seed, seed) == seed) {
+    if (Atomic::cmpxchg(&_rand_seed, seed, rand) == seed) {
       return static_cast<int>(rand);
     }
   }
@@ -926,6 +926,14 @@ void os::print_hex_dump(outputStream* st, address start, address end, int unitsi
     }
   }
   st->cr();
+}
+
+void os::print_dhm(outputStream* st, const char* startStr, long sec) {
+  long days    = sec/86400;
+  long hours   = (sec/3600) - (days * 24);
+  long minutes = (sec/60) - (days * 1440) - (hours * 60);
+  if (startStr == NULL) startStr = "";
+  st->print_cr("%s %ld days %ld:%02ld hours", startStr, days, hours, minutes);
 }
 
 void os::print_instructions(outputStream* st, address pc, int unitsize) {
@@ -1008,10 +1016,9 @@ void os::print_date_and_time(outputStream *st, char* buf, size_t buflen) {
   }
 
   double t = os::elapsedTime();
-  // NOTE: It tends to crash after a SEGV if we want to printf("%f",...) in
-  //       Linux. Must be a bug in glibc ? Workaround is to round "t" to int
-  //       before printf. We lost some precision, but who cares?
+  // NOTE: a crash using printf("%f",...) on Linux was historically noted here.
   int eltime = (int)t;  // elapsed time in seconds
+  int eltimeFraction = (int) ((t - eltime) * 1000000);
 
   // print elapsed time in a human-readable format:
   int eldays = eltime / secs_per_day;
@@ -1021,7 +1028,7 @@ void os::print_date_and_time(outputStream *st, char* buf, size_t buflen) {
   int elmins = (eltime - day_secs - hour_secs) / secs_per_min;
   int minute_secs = elmins * secs_per_min;
   int elsecs = (eltime - day_secs - hour_secs - minute_secs);
-  st->print_cr(" elapsed time: %d seconds (%dd %dh %dm %ds)", eltime, eldays, elhours, elmins, elsecs);
+  st->print_cr(" elapsed time: %d.%06d seconds (%dd %dh %dm %ds)", eltime, eltimeFraction, eldays, elhours, elmins, elsecs);
 }
 
 
@@ -1106,7 +1113,7 @@ void os::print_location(outputStream* st, intptr_t x, bool verbose) {
     }
     // If the addr is in the stack region for this thread then report that
     // and print thread info
-    if (thread->on_local_stack(addr)) {
+    if (thread->is_in_full_stack(addr)) {
       st->print_cr(INTPTR_FORMAT " is pointing into the stack for thread: "
                    INTPTR_FORMAT, p2i(addr), p2i(thread));
       if (verbose) thread->print_on(st);
@@ -1741,6 +1748,7 @@ bool os::uncommit_memory(char* addr, size_t bytes) {
 bool os::release_memory(char* addr, size_t bytes) {
   bool res;
   if (MemTracker::tracking_level() > NMT_minimal) {
+    // Note: Tracker contains a ThreadCritical.
     Tracker tkr(Tracker::release);
     res = pd_release_memory(addr, bytes);
     if (res) {
@@ -1797,6 +1805,35 @@ void os::realign_memory(char *addr, size_t bytes, size_t alignment_hint) {
   pd_realign_memory(addr, bytes, alignment_hint);
 }
 
+char* os::reserve_memory_special(size_t size, size_t alignment,
+                                 char* addr, bool executable) {
+
+  assert(is_aligned(addr, alignment), "Unaligned request address");
+
+  char* result = pd_reserve_memory_special(size, alignment, addr, executable);
+  if (result != NULL) {
+    // The memory is committed
+    MemTracker::record_virtual_memory_reserve_and_commit((address)result, size, CALLER_PC);
+  }
+
+  return result;
+}
+
+bool os::release_memory_special(char* addr, size_t bytes) {
+  bool res;
+  if (MemTracker::tracking_level() > NMT_minimal) {
+    // Note: Tracker contains a ThreadCritical.
+    Tracker tkr(Tracker::release);
+    res = pd_release_memory_special(addr, bytes);
+    if (res) {
+      tkr.record((address)addr, bytes);
+    }
+  } else {
+    res = pd_release_memory_special(addr, bytes);
+  }
+  return res;
+}
+
 #ifndef _WINDOWS
 /* try to switch state from state "from" to state "to"
  * returns the state set after the method is complete
@@ -1804,7 +1841,7 @@ void os::realign_memory(char *addr, size_t bytes, size_t alignment_hint) {
 os::SuspendResume::State os::SuspendResume::switch_state(os::SuspendResume::State from,
                                                          os::SuspendResume::State to)
 {
-  os::SuspendResume::State result = Atomic::cmpxchg(to, &_state, from);
+  os::SuspendResume::State result = Atomic::cmpxchg(&_state, from, to);
   if (result == from) {
     // success
     return to;

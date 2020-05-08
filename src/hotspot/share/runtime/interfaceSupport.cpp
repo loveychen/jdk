@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -33,7 +33,6 @@
 #include "runtime/handles.inline.hpp"
 #include "runtime/init.hpp"
 #include "runtime/interfaceSupport.inline.hpp"
-#include "runtime/orderAccess.hpp"
 #include "runtime/os.inline.hpp"
 #include "runtime/thread.inline.hpp"
 #include "runtime/safepointVerifiers.hpp"
@@ -75,7 +74,6 @@ VMNativeEntryWrapper::~VMNativeEntryWrapper() {
   if (GCALotAtAllSafepoints) InterfaceSupport::check_gc_alot();
 }
 
-long InterfaceSupport::_number_of_calls       = 0;
 long InterfaceSupport::_scavenge_alot_counter = 1;
 long InterfaceSupport::_fullgc_alot_counter   = 1;
 long InterfaceSupport::_fullgc_alot_invocation = 0;
@@ -87,8 +85,8 @@ RuntimeHistogramElement::RuntimeHistogramElement(const char* elementName) {
   _name = elementName;
   uintx count = 0;
 
-  while (Atomic::cmpxchg(1, &RuntimeHistogram_lock, 0) != 0) {
-    while (OrderAccess::load_acquire(&RuntimeHistogram_lock) != 0) {
+  while (Atomic::cmpxchg(&RuntimeHistogram_lock, 0, 1) != 0) {
+    while (Atomic::load_acquire(&RuntimeHistogram_lock) != 0) {
       count +=1;
       if ( (WarnOnStalledSpinLock > 0)
         && (count % WarnOnStalledSpinLock == 0)) {

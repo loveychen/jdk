@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -26,6 +26,8 @@
 #include "classfile/vmSymbols.hpp"
 #include "jfr/jfrEvents.hpp"
 #include "jfr/support/jfrThreadId.hpp"
+#include "logging/log.hpp"
+#include "logging/logStream.hpp"
 #include "memory/allocation.inline.hpp"
 #include "memory/resourceArea.hpp"
 #include "oops/markWord.hpp"
@@ -243,7 +245,7 @@ void ObjectMonitor::enter(TRAPS) {
   // and to reduce RTS->RTO cache line upgrades on SPARC and IA32 processors.
   Thread * const Self = THREAD;
 
-  void * cur = Atomic::cmpxchg(Self, &_owner, (void*)NULL);
+  void* cur = try_set_owner_from(NULL, Self);
   if (cur == NULL) {
     assert(_recursions == 0, "invariant");
     return;
@@ -255,12 +257,10 @@ void ObjectMonitor::enter(TRAPS) {
     return;
   }
 
-  if (Self->is_lock_owned ((address)cur)) {
+  if (Self->is_lock_owned((address)cur)) {
     assert(_recursions == 0, "internal state error");
     _recursions = 1;
-    // Commute owner from a thread-specific on-stack BasicLockObject address to
-    // a full-fledged "Thread *".
-    _owner = Self;
+    set_owner_from_BasicLock(cur, Self);  // Convert from BasicLock* to Thread*.
     return;
   }
 
@@ -275,8 +275,7 @@ void ObjectMonitor::enter(TRAPS) {
   // we forgo posting JVMTI events and firing DTRACE probes.
   if (TrySpin(Self) > 0) {
     assert(_owner == Self, "must be Self: owner=" INTPTR_FORMAT, p2i(_owner));
-    assert(_recursions == 0, "must be 0: recursions=" INTPTR_FORMAT,
-           _recursions);
+    assert(_recursions == 0, "must be 0: recursions=" INTX_FORMAT, _recursions);
     assert(((oop)object())->mark() == markWord::encode(this),
            "object mark must match encoded this: mark=" INTPTR_FORMAT
            ", encoded this=" INTPTR_FORMAT, ((oop)object())->mark().value(),
@@ -402,7 +401,7 @@ void ObjectMonitor::enter(TRAPS) {
 int ObjectMonitor::TryLock(Thread * Self) {
   void * own = _owner;
   if (own != NULL) return 0;
-  if (Atomic::replace_if_null(Self, &_owner)) {
+  if (try_set_owner_from(NULL, Self) == NULL) {
     assert(_recursions == 0, "invariant");
     return 1;
   }
@@ -479,7 +478,7 @@ void ObjectMonitor::EnterI(TRAPS) {
   ObjectWaiter * nxt;
   for (;;) {
     node._next = nxt = _cxq;
-    if (Atomic::cmpxchg(&node, &_cxq, nxt) == nxt) break;
+    if (Atomic::cmpxchg(&_cxq, nxt, &node) == nxt) break;
 
     // Interference - the CAS failed because _cxq changed.  Just retry.
     // As an optional optimization we retry the lock.
@@ -517,7 +516,7 @@ void ObjectMonitor::EnterI(TRAPS) {
   if (nxt == NULL && _EntryList == NULL) {
     // Try to assume the role of responsible thread for the monitor.
     // CONSIDER:  ST vs CAS vs { if (Responsible==null) Responsible=Self }
-    Atomic::replace_if_null(Self, &_Responsible);
+    Atomic::replace_if_null(&_Responsible, Self);
   }
 
   // The lock might have been released while this thread was occupied queueing
@@ -772,7 +771,7 @@ void ObjectMonitor::UnlinkAfterAcquire(Thread *Self, ObjectWaiter *SelfNode) {
 
     ObjectWaiter * v = _cxq;
     assert(v != NULL, "invariant");
-    if (v != SelfNode || Atomic::cmpxchg(SelfNode->_next, &_cxq, v) != v) {
+    if (v != SelfNode || Atomic::cmpxchg(&_cxq, v, SelfNode->_next) != v) {
       // The CAS above can fail from interference IFF a "RAT" arrived.
       // In that case Self must be in the interior and can no longer be
       // at the head of cxq.
@@ -861,15 +860,12 @@ void ObjectMonitor::UnlinkAfterAcquire(Thread *Self, ObjectWaiter *SelfNode) {
 // of such futile wakups is low.
 
 void ObjectMonitor::exit(bool not_suspended, TRAPS) {
-  Thread * const Self = THREAD;
-  if (THREAD != _owner) {
-    if (THREAD->is_lock_owned((address) _owner)) {
-      // Transmute _owner from a BasicLock pointer to a Thread address.
-      // We don't need to hold _mutex for this transition.
-      // Non-null to Non-null is safe as long as all readers can
-      // tolerate either flavor.
+  Thread* const Self = THREAD;
+  void* cur = Atomic::load(&_owner);
+  if (THREAD != cur) {
+    if (THREAD->is_lock_owned((address)cur)) {
       assert(_recursions == 0, "invariant");
-      _owner = THREAD;
+      set_owner_from_BasicLock(cur, Self);  // Convert from BasicLock* to Thread*.
       _recursions = 0;
     } else {
       // Apparent unbalanced locking ...
@@ -881,7 +877,14 @@ void ObjectMonitor::exit(bool not_suspended, TRAPS) {
       // way we should encounter this situation is in the presence of
       // unbalanced JNI locking. TODO: CheckJNICalls.
       // See also: CR4414101
-      assert(false, "Non-balanced monitor enter/exit! Likely JNI locking");
+#ifdef ASSERT
+      LogStreamHandle(Error, monitorinflation) lsh;
+      lsh.print_cr("ERROR: ObjectMonitor::exit(): thread=" INTPTR_FORMAT
+                    " is exiting an ObjectMonitor it does not own.", p2i(THREAD));
+      lsh.print_cr("The imbalance is possibly caused by JNI locking.");
+      print_debug_style_on(&lsh);
+#endif
+      assert(false, "Non-balanced monitor enter/exit!");
       return;
     }
   }
@@ -906,12 +909,15 @@ void ObjectMonitor::exit(bool not_suspended, TRAPS) {
   for (;;) {
     assert(THREAD == _owner, "invariant");
 
+    // Drop the lock.
     // release semantics: prior loads and stores from within the critical section
     // must not float (reorder) past the following store that drops the lock.
-    // On SPARC that requires MEMBAR #loadstore|#storestore.
-    // But of course in TSO #loadstore|#storestore is not required.
-    OrderAccess::release_store(&_owner, (void*)NULL);   // drop the lock
-    OrderAccess::storeload();                        // See if we need to wake a successor
+    // Uses a storeload to separate release_store(owner) from the
+    // successor check. The try_set_owner() below uses cmpxchg() so
+    // we get the fence down there.
+    release_clear_owner(Self);
+    OrderAccess::storeload();
+
     if ((intptr_t(_EntryList)|intptr_t(_cxq)) == 0 || _succ != NULL) {
       return;
     }
@@ -953,7 +959,7 @@ void ObjectMonitor::exit(bool not_suspended, TRAPS) {
     // to reacquire the lock the responsibility for ensuring succession
     // falls to the new owner.
     //
-    if (!Atomic::replace_if_null(THREAD, &_owner)) {
+    if (try_set_owner_from(NULL, Self) != NULL) {
       return;
     }
 
@@ -989,7 +995,7 @@ void ObjectMonitor::exit(bool not_suspended, TRAPS) {
     // The following loop is tantamount to: w = swap(&cxq, NULL)
     for (;;) {
       assert(w != NULL, "Invariant");
-      ObjectWaiter * u = Atomic::cmpxchg((ObjectWaiter*)NULL, &_cxq, w);
+      ObjectWaiter * u = Atomic::cmpxchg(&_cxq, w, (ObjectWaiter*)NULL);
       if (u == w) break;
       w = u;
     }
@@ -1086,8 +1092,9 @@ void ObjectMonitor::ExitEpilog(Thread * Self, ObjectWaiter * Wakee) {
   Wakee  = NULL;
 
   // Drop the lock
-  OrderAccess::release_store(&_owner, (void*)NULL);
-  OrderAccess::fence();                               // ST _owner vs LD in unpark()
+  // Uses a fence to separate release_store(owner) from the LD in unpark().
+  release_clear_owner(Self);
+  OrderAccess::fence();
 
   DTRACE_MONITOR_PROBE(contended__exit, this, object(), Self);
   Trigger->unpark();
@@ -1106,23 +1113,24 @@ void ObjectMonitor::ExitEpilog(Thread * Self, ObjectWaiter * Wakee) {
 // The _owner field is not always the Thread addr even with an
 // inflated monitor, e.g. the monitor can be inflated by a non-owning
 // thread due to contention.
-intptr_t ObjectMonitor::complete_exit(TRAPS) {
+intx ObjectMonitor::complete_exit(TRAPS) {
   Thread * const Self = THREAD;
   assert(Self->is_Java_thread(), "Must be Java thread!");
   JavaThread *jt = (JavaThread *)THREAD;
 
   assert(InitDone, "Unexpectedly not initialized");
 
-  if (THREAD != _owner) {
-    if (THREAD->is_lock_owned ((address)_owner)) {
+  void* cur = Atomic::load(&_owner);
+  if (THREAD != cur) {
+    if (THREAD->is_lock_owned((address)cur)) {
       assert(_recursions == 0, "internal state error");
-      _owner = THREAD;   // Convert from basiclock addr to Thread addr
+      set_owner_from_BasicLock(cur, Self);  // Convert from BasicLock* to Thread*.
       _recursions = 0;
     }
   }
 
   guarantee(Self == _owner, "complete_exit not owner");
-  intptr_t save = _recursions; // record the old recursion count
+  intx save = _recursions; // record the old recursion count
   _recursions = 0;        // set the recursion level to be 0
   exit(true, Self);           // exit the monitor
   guarantee(_owner != Self, "invariant");
@@ -1131,7 +1139,7 @@ intptr_t ObjectMonitor::complete_exit(TRAPS) {
 
 // reenter() enters a lock and sets recursion count
 // complete_exit/reenter operate as a wait without waiting
-void ObjectMonitor::reenter(intptr_t recursions, TRAPS) {
+void ObjectMonitor::reenter(intx recursions, TRAPS) {
   Thread * const Self = THREAD;
   assert(Self->is_Java_thread(), "Must be Java thread!");
   JavaThread *jt = (JavaThread *)THREAD;
@@ -1161,11 +1169,12 @@ void ObjectMonitor::reenter(intptr_t recursions, TRAPS) {
 // (IMSE). If there is a pending exception and the specified thread
 // is not the owner, that exception will be replaced by the IMSE.
 bool ObjectMonitor::check_owner(Thread* THREAD) {
-  if (_owner == THREAD) {
+  void* cur = Atomic::load(&_owner);
+  if (cur == THREAD) {
     return true;
   }
-  if (THREAD->is_lock_owned((address)_owner)) {
-    _owner = THREAD;  // convert from BasicLock addr to Thread addr
+  if (THREAD->is_lock_owned((address)cur)) {
+    set_owner_from_BasicLock(cur, THREAD);  // Convert from BasicLock* to Thread*.
     _recursions = 0;
     return true;
   }
@@ -1252,7 +1261,7 @@ void ObjectMonitor::wait(jlong millis, bool interruptible, TRAPS) {
 
   _Responsible = NULL;
 
-  intptr_t save = _recursions; // record the old recursion count
+  intx save = _recursions;     // record the old recursion count
   _waiters++;                  // increment the number of waiters
   _recursions = 0;             // set the recursion level to be 1
   exit(true, Self);                    // exit the monitor
@@ -1267,6 +1276,10 @@ void ObjectMonitor::wait(jlong millis, bool interruptible, TRAPS) {
 
   int ret = OS_OK;
   int WasNotified = 0;
+
+  // Need to check interrupt state whilst still _thread_in_vm
+  bool interrupted = interruptible && jt->is_interrupted(false);
+
   { // State transition wrappers
     OSThread* osthread = Self->osthread();
     OSThreadWaitState osts(osthread, true);
@@ -1275,7 +1288,7 @@ void ObjectMonitor::wait(jlong millis, bool interruptible, TRAPS) {
       // Thread is in thread_blocked state and oop access is unsafe.
       jt->set_suspend_equivalent();
 
-      if (interruptible && (jt->is_interrupted(false) || HAS_PENDING_EXCEPTION)) {
+      if (interrupted || HAS_PENDING_EXCEPTION) {
         // Intentionally empty
       } else if (node._notified == 0) {
         if (millis <= 0) {
@@ -1449,7 +1462,7 @@ void ObjectMonitor::INotify(Thread * Self) {
       for (;;) {
         ObjectWaiter * front = _cxq;
         iterator->_next = front;
-        if (Atomic::cmpxchg(iterator, &_cxq, front) == front) {
+        if (Atomic::cmpxchg(&_cxq, front, iterator) == front) {
           break;
         }
       }
@@ -1670,7 +1683,7 @@ int ObjectMonitor::TrySpin(Thread * Self) {
 
     Thread * ox = (Thread *) _owner;
     if (ox == NULL) {
-      ox = (Thread*)Atomic::cmpxchg(Self, &_owner, (void*)NULL);
+      ox = (Thread*)try_set_owner_from(NULL, Self);
       if (ox == NULL) {
         // The CAS succeeded -- this thread acquired ownership
         // Take care of some bookkeeping to exit spin state.
@@ -1937,8 +1950,62 @@ void ObjectMonitor::Initialize() {
 void ObjectMonitor::print_on(outputStream* st) const {
   // The minimal things to print for markWord printing, more can be added for debugging and logging.
   st->print("{contentions=0x%08x,waiters=0x%08x"
-            ",recursions=" INTPTR_FORMAT ",owner=" INTPTR_FORMAT "}",
+            ",recursions=" INTX_FORMAT ",owner=" INTPTR_FORMAT "}",
             contentions(), waiters(), recursions(),
             p2i(owner()));
 }
 void ObjectMonitor::print() const { print_on(tty); }
+
+#ifdef ASSERT
+// Print the ObjectMonitor like a debugger would:
+//
+// (ObjectMonitor) 0x00007fdfb6012e40 = {
+//   _header = 0x0000000000000001
+//   _object = 0x000000070ff45fd0
+//   _next_om = 0x0000000000000000
+//   _pad_buf0 = {
+//     [0] = '\0'
+//     ...
+//     [103] = '\0'
+//   }
+//   _owner = 0x0000000000000000
+//   _previous_owner_tid = 0
+//   _recursions = 0
+//   _EntryList = 0x0000000000000000
+//   _cxq = 0x0000000000000000
+//   _succ = 0x0000000000000000
+//   _Responsible = 0x0000000000000000
+//   _Spinner = 0
+//   _SpinDuration = 5000
+//   _contentions = 0
+//   _WaitSet = 0x0000700009756248
+//   _waiters = 1
+//   _WaitSetLock = 0
+// }
+//
+void ObjectMonitor::print_debug_style_on(outputStream* st) const {
+  st->print_cr("(ObjectMonitor*) " INTPTR_FORMAT " = {", p2i(this));
+  st->print_cr("  _header = " INTPTR_FORMAT, header().value());
+  st->print_cr("  _object = " INTPTR_FORMAT, p2i(_object));
+  st->print_cr("  _next_om = " INTPTR_FORMAT, p2i(next_om()));
+  st->print_cr("  _pad_buf0 = {");
+  st->print_cr("    [0] = '\\0'");
+  st->print_cr("    ...");
+  st->print_cr("    [%d] = '\\0'", (int)sizeof(_pad_buf0) - 1);
+  st->print_cr("  }");
+  st->print_cr("  _owner = " INTPTR_FORMAT, p2i(_owner));
+  st->print_cr("  _previous_owner_tid = " JLONG_FORMAT, _previous_owner_tid);
+  st->print_cr("  _recursions = " INTX_FORMAT, _recursions);
+  st->print_cr("  _EntryList = " INTPTR_FORMAT, p2i(_EntryList));
+  st->print_cr("  _cxq = " INTPTR_FORMAT, p2i(_cxq));
+  st->print_cr("  _succ = " INTPTR_FORMAT, p2i(_succ));
+  st->print_cr("  _Responsible = " INTPTR_FORMAT, p2i(_Responsible));
+  st->print_cr("  _Spinner = %d", _Spinner);
+  st->print_cr("  _SpinDuration = %d", _SpinDuration);
+  st->print_cr("  _contentions = %d", _contentions);
+  st->print_cr("  _WaitSet = " INTPTR_FORMAT, p2i(_WaitSet));
+  st->print_cr("  _waiters = %d", _waiters);
+  st->print_cr("  _WaitSetLock = %d", _WaitSetLock);
+  st->print_cr("}");
+}
+#endif

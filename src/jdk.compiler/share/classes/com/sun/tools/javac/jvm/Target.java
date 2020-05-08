@@ -76,7 +76,10 @@ public enum Target {
     JDK1_13("13", 57, 0),
 
     /** JDK 14. */
-    JDK1_14("14", 58, 0);
+    JDK1_14("14", 58, 0),
+
+    /** JDK 15. */
+    JDK1_15("15", 59, 0);
 
     private static final Context.Key<Target> targetKey = new Context.Key<>();
 
@@ -164,6 +167,14 @@ public enum Target {
      */
     public boolean hasNestmateAccess() {
         return compareTo(JDK1_11) >= 0;
+    }
+
+    /** language runtime uses nest-based access.
+     *  e.g. lambda and string concat spin dynamic proxy class as a nestmate
+     *  of the target class
+     */
+    public boolean runtimeUseNestAccess() {
+        return compareTo(JDK1_15) >= 0;
     }
 
     /** Does the target VM support virtual private invocations?

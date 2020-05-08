@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -106,6 +106,7 @@ public final class ChunkParser {
 
     private Runnable flushOperation;
     private ParserConfiguration configuration;
+    private volatile boolean closed;
 
     public ChunkParser(RecordingInput input) throws IOException {
         this(input, new ParserConfiguration());
@@ -186,47 +187,41 @@ public final class ChunkParser {
 
     /**
      * Reads an event and returns null when segment or chunk ends.
-     *
-     * @param awaitNewEvents wait for new data.
      */
-    RecordedEvent readStreamingEvent(boolean awaitNewEvents) throws IOException {
+    RecordedEvent readStreamingEvent() throws IOException {
         long absoluteChunkEnd = chunkHeader.getEnd();
-        while (true) {
-            RecordedEvent event = readEvent();
-            if (event != null) {
-                return event;
-            }
-            if (!awaitNewEvents) {
-                return null;
-            }
-            long lastValid = absoluteChunkEnd;
-            long metadataPoistion = chunkHeader.getMetataPosition();
-            long contantPosition = chunkHeader.getConstantPoolPosition();
-            chunkFinished = awaitUpdatedHeader(absoluteChunkEnd);
-            if (chunkFinished) {
-                Logger.log(LogTag.JFR_SYSTEM_PARSER, LogLevel.INFO, "At chunk end");
-                return null;
-            }
-            absoluteChunkEnd = chunkHeader.getEnd();
-            // Read metadata and constant pools for the next segment
-            if (chunkHeader.getMetataPosition() != metadataPoistion) {
-                Logger.log(LogTag.JFR_SYSTEM_PARSER, LogLevel.INFO, "Found new metadata in chunk. Rebuilding types and parsers");
-                MetadataDescriptor metadata = chunkHeader.readMetadata(previousMetadata);
-                ParserFactory factory = new ParserFactory(metadata, constantLookups, timeConverter);
-                parsers = factory.getParsers();
-                typeMap = factory.getTypeMap();
-                updateConfiguration();;
-            }
-            if (contantPosition != chunkHeader.getConstantPoolPosition()) {
-                Logger.log(LogTag.JFR_SYSTEM_PARSER, LogLevel.INFO, "Found new constant pool data. Filling up pools with new values");
-                constantLookups.forEach(c -> c.getLatestPool().setAllResolved(false));
-                fillConstantPools(contantPosition + chunkHeader.getAbsoluteChunkStart());
-                constantLookups.forEach(c -> c.getLatestPool().setResolving());
-                constantLookups.forEach(c -> c.getLatestPool().resolve());
-                constantLookups.forEach(c -> c.getLatestPool().setResolved());
-            }
-            input.position(lastValid);
+        RecordedEvent event = readEvent();
+        if (event != null) {
+            return event;
         }
+        long lastValid = absoluteChunkEnd;
+        long metadataPosition = chunkHeader.getMetataPosition();
+        long constantPosition = chunkHeader.getConstantPoolPosition();
+        chunkFinished = awaitUpdatedHeader(absoluteChunkEnd, configuration.filterEnd);
+        if (chunkFinished) {
+            Logger.log(LogTag.JFR_SYSTEM_PARSER, LogLevel.INFO, "At chunk end");
+            return null;
+        }
+        absoluteChunkEnd = chunkHeader.getEnd();
+        // Read metadata and constant pools for the next segment
+        if (chunkHeader.getMetataPosition() != metadataPosition) {
+            Logger.log(LogTag.JFR_SYSTEM_PARSER, LogLevel.INFO, "Found new metadata in chunk. Rebuilding types and parsers");
+            MetadataDescriptor metadata = chunkHeader.readMetadata(previousMetadata);
+            ParserFactory factory = new ParserFactory(metadata, constantLookups, timeConverter);
+            parsers = factory.getParsers();
+            typeMap = factory.getTypeMap();
+            updateConfiguration();
+        }
+        if (constantPosition != chunkHeader.getConstantPoolPosition()) {
+            Logger.log(LogTag.JFR_SYSTEM_PARSER, LogLevel.INFO, "Found new constant pool data. Filling up pools with new values");
+            constantLookups.forEach(c -> c.getLatestPool().setAllResolved(false));
+            fillConstantPools(constantPosition + chunkHeader.getAbsoluteChunkStart());
+            constantLookups.forEach(c -> c.getLatestPool().setResolving());
+            constantLookups.forEach(c -> c.getLatestPool().resolve());
+            constantLookups.forEach(c -> c.getLatestPool().setResolved());
+        }
+        input.position(lastValid);
+        return null;
     }
 
     /**
@@ -279,11 +274,17 @@ public final class ChunkParser {
         }
     }
 
-    private boolean awaitUpdatedHeader(long absoluteChunkEnd) throws IOException {
+    private boolean awaitUpdatedHeader(long absoluteChunkEnd, long filterEnd) throws IOException {
         if (Logger.shouldLog(LogTag.JFR_SYSTEM_PARSER, LogLevel.INFO)) {
             Logger.log(LogTag.JFR_SYSTEM_PARSER, LogLevel.INFO, "Waiting for more data (streaming). Read so far: " + chunkHeader.getChunkSize() + " bytes");
         }
         while (true) {
+            if (closed) {
+                return true;
+            }
+            if (chunkHeader.getLastNanos() > filterEnd)  {
+              return true;
+            }
             chunkHeader.refresh();
             if (absoluteChunkEnd != chunkHeader.getEnd()) {
                 return false;
@@ -446,6 +447,15 @@ public final class ChunkParser {
 
     public long getStartNanos() {
         return chunkHeader.getStartNanos();
+    }
+
+    public boolean isFinalChunk() {
+        return chunkHeader.isFinalChunk();
+    }
+
+    public void close() {
+        this.closed = true;
+        Utils.notifyFlush();
     }
 
 }

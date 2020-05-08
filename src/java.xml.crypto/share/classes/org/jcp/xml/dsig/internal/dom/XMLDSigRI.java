@@ -28,7 +28,7 @@
  * ===========================================================================
  */
 /*
- * Portions copyright (c) 2005, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2005, 2019, Oracle and/or its affiliates. All rights reserved.
  */
 /*
  * $Id: XMLDSigRI.java 1833618 2018-06-15 17:36:20Z mullan $
@@ -135,7 +135,7 @@ public final class XMLDSigRI extends Provider {
 
     public XMLDSigRI() {
         // This is the JDK XMLDSig provider, synced from
-        // Apache Santuario XML Security for Java, version 2.1.3
+        // Apache Santuario XML Security for Java, version 2.1.4
         super("XMLDSig", VER, INFO);
 
         final Provider p = this;

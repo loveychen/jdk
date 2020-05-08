@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -33,6 +33,7 @@
 #include "gc/z/zServiceability.hpp"
 #include "gc/z/zStat.hpp"
 #include "gc/z/zUtils.inline.hpp"
+#include "memory/iterator.hpp"
 #include "memory/universe.hpp"
 #include "runtime/mutexLocker.hpp"
 #include "utilities/align.hpp"
@@ -246,8 +247,8 @@ void ZCollectedHeap::object_iterate(ObjectClosure* cl) {
   _heap.object_iterate(cl, true /* visit_weaks */);
 }
 
-void ZCollectedHeap::safe_object_iterate(ObjectClosure* cl) {
-  _heap.object_iterate(cl, true /* visit_weaks */);
+void ZCollectedHeap::keep_alive(oop obj) {
+  _heap.keep_alive(obj);
 }
 
 void ZCollectedHeap::register_nmethod(nmethod* nm) {
@@ -351,4 +352,8 @@ void ZCollectedHeap::verify(VerifyOption option /* ignored */) {
 
 bool ZCollectedHeap::is_oop(oop object) const {
   return _heap.is_oop(ZOop::to_address(object));
+}
+
+bool ZCollectedHeap::supports_concurrent_gc_breakpoints() const {
+  return true;
 }

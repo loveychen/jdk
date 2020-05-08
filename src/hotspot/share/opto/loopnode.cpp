@@ -31,15 +31,18 @@
 #include "memory/allocation.inline.hpp"
 #include "memory/resourceArea.hpp"
 #include "opto/addnode.hpp"
+#include "opto/arraycopynode.hpp"
 #include "opto/callnode.hpp"
 #include "opto/connode.hpp"
 #include "opto/convertnode.hpp"
 #include "opto/divnode.hpp"
 #include "opto/idealGraphPrinter.hpp"
 #include "opto/loopnode.hpp"
+#include "opto/movenode.hpp"
 #include "opto/mulnode.hpp"
 #include "opto/rootnode.hpp"
 #include "opto/superword.hpp"
+#include "utilities/powerOfTwo.hpp"
 
 //=============================================================================
 //--------------------------is_cloop_ind_var-----------------------------------
@@ -944,17 +947,21 @@ Node *LoopNode::Ideal(PhaseGVN *phase, bool can_reshape) {
   return RegionNode::Ideal(phase, can_reshape);
 }
 
-void LoopNode::verify_strip_mined(int expect_skeleton) const {
 #ifdef ASSERT
+void LoopNode::verify_strip_mined(int expect_skeleton) const {
   const OuterStripMinedLoopNode* outer = NULL;
   const CountedLoopNode* inner = NULL;
   if (is_strip_mined()) {
+    if (!is_valid_counted_loop()) {
+      return; // Skip malformed counted loop
+    }
     assert(is_CountedLoop(), "no Loop should be marked strip mined");
     inner = as_CountedLoop();
     outer = inner->in(LoopNode::EntryControl)->as_OuterStripMinedLoop();
   } else if (is_OuterStripMinedLoop()) {
     outer = this->as_OuterStripMinedLoop();
     inner = outer->unique_ctrl_out()->as_CountedLoop();
+    assert(inner->is_valid_counted_loop() && inner->is_strip_mined(), "OuterStripMinedLoop should have been removed");
     assert(!is_strip_mined(), "outer loop shouldn't be marked strip mined");
   }
   if (inner != NULL || outer != NULL) {
@@ -1024,8 +1031,8 @@ void LoopNode::verify_strip_mined(int expect_skeleton) const {
     assert(sfpt->outcnt() == 1, "no data node");
     assert(outer_tail->outcnt() == 1 || !has_skeleton, "no data node");
   }
-#endif
 }
+#endif
 
 //=============================================================================
 //------------------------------Ideal------------------------------------------
@@ -1236,7 +1243,7 @@ Node* CountedLoopNode::match_incr_with_optional_truncation(
 }
 
 LoopNode* CountedLoopNode::skip_strip_mined(int expect_skeleton) {
-  if (is_strip_mined()) {
+  if (is_strip_mined() && is_valid_counted_loop()) {
     verify_strip_mined(expect_skeleton);
     return in(EntryControl)->as_Loop();
   }
@@ -1583,7 +1590,13 @@ void OuterStripMinedLoopNode::adjust_strip_mined_loop(PhaseIterGVN* igvn) {
     } else {
       sub = igvn->transform(new SubINode(iv_phi, limit));
     }
-    Node* min = igvn->transform(new MinINode(sub, igvn->intcon(scaled_iters)));
+    // sub is positive and can be larger than the max signed int
+    // value. Use an unsigned min.
+    Node* const_iters = igvn->intcon(scaled_iters);
+    Node* cmp = igvn->transform(new CmpUNode(sub, const_iters));
+    Node* bol = igvn->transform(new BoolNode(cmp, BoolTest::lt));
+    Node* min = igvn->transform(new CMoveINode(bol, const_iters, sub, TypeInt::make(0, scaled_iters, Type::WidenMin)));
+
     Node* new_limit = NULL;
     if (stride > 0) {
       new_limit = igvn->transform(new AddINode(min, iv_phi));
@@ -1798,7 +1811,7 @@ void IdealLoopTree::split_fall_in( PhaseIdealLoop *phase, int fall_in_cnt ) {
       // disappear it.  In JavaGrande I have a case where this useless
       // Phi is the loop limit and prevents recognizing a CountedLoop
       // which in turn prevents removing an empty loop.
-      Node *id_old_phi = igvn.apply_identity(old_phi);
+      Node *id_old_phi = old_phi->Identity(&igvn);
       if( id_old_phi != old_phi ) { // Found a simple identity?
         // Note that I cannot call 'replace_node' here, because
         // that will yank the edge from old_phi to the Region and
@@ -2085,7 +2098,7 @@ bool IdealLoopTree::beautify_loops( PhaseIdealLoop *phase ) {
   // If I am a shared header (multiple backedges), peel off the many
   // backedges into a private merge point and use the merge point as
   // the one true backedge.
-  if( _head->req() > 3 ) {
+  if (_head->req() > 3 && !_irreducible) {
     // Merge the many backedges into a single backedge but leave
     // the hottest backedge as separate edge for the following peel.
     merge_many_backedges( phase );
@@ -2501,13 +2514,14 @@ uint IdealLoopTree::est_loop_flow_merge_sz() const {
 
     for (uint k = 0; k < outcnt; k++) {
       Node* out = node->raw_out(k);
-
+      if (out == NULL) continue;
       if (out->is_CFG()) {
         if (!is_member(_phase->get_loop(out))) {
           ctrl_edge_out_cnt++;
         }
-      } else {
+      } else if (_phase->has_ctrl(out)) {
         Node* ctrl = _phase->get_ctrl(out);
+        assert(ctrl != NULL, "must be");
         assert(ctrl->is_CFG(), "must be");
         if (!is_member(_phase->get_loop(ctrl))) {
           data_edge_out_cnt++;
@@ -2537,17 +2551,17 @@ void IdealLoopTree::dump_head() const {
     tty->print(" limit_check");
     entry = PhaseIdealLoop::skip_loop_predicates(entry);
   }
-  if (UseLoopPredicate) {
-    entry = PhaseIdealLoop::find_predicate_insertion_point(entry, Deoptimization::Reason_predicate);
-    if (entry != NULL) {
-      tty->print(" predicated");
+  if (UseProfiledLoopPredicate) {
+    predicate = PhaseIdealLoop::find_predicate_insertion_point(entry, Deoptimization::Reason_profile_predicate);
+    if (predicate != NULL) {
+      tty->print(" profile_predicated");
       entry = PhaseIdealLoop::skip_loop_predicates(entry);
     }
   }
-  if (UseProfiledLoopPredicate) {
-    entry = PhaseIdealLoop::find_predicate_insertion_point(entry, Deoptimization::Reason_profile_predicate);
-    if (entry != NULL) {
-      tty->print(" profile_predicated");
+  if (UseLoopPredicate) {
+    predicate = PhaseIdealLoop::find_predicate_insertion_point(entry, Deoptimization::Reason_predicate);
+    if (predicate != NULL) {
+      tty->print(" predicated");
     }
   }
   if (_head->is_CountedLoop()) {
@@ -2652,21 +2666,21 @@ void PhaseIdealLoop::collect_potentially_useful_predicates(
     LoopNode* lpn = loop->_head->as_Loop();
     Node* entry = lpn->in(LoopNode::EntryControl);
     Node* predicate_proj = find_predicate(entry); // loop_limit_check first
-    if (predicate_proj != NULL ) { // right pattern that can be used by loop predication
+    if (predicate_proj != NULL) { // right pattern that can be used by loop predication
       assert(entry->in(0)->in(1)->in(1)->Opcode() == Op_Opaque1, "must be");
-      useful_predicates.push(entry->in(0)->in(1)->in(1)); // good one
-      entry = skip_loop_predicates(entry);
-    }
-    predicate_proj = find_predicate(entry); // Predicate
-    if (predicate_proj != NULL ) {
       useful_predicates.push(entry->in(0)->in(1)->in(1)); // good one
       entry = skip_loop_predicates(entry);
     }
     if (UseProfiledLoopPredicate) {
       predicate_proj = find_predicate(entry); // Predicate
-      if (predicate_proj != NULL ) {
+      if (predicate_proj != NULL) {
         useful_predicates.push(entry->in(0)->in(1)->in(1)); // good one
+        entry = skip_loop_predicates(entry);
       }
+    }
+    predicate_proj = find_predicate(entry); // Predicate
+    if (predicate_proj != NULL) {
+      useful_predicates.push(entry->in(0)->in(1)->in(1)); // good one
     }
   }
 
@@ -3001,6 +3015,33 @@ void PhaseIdealLoop::build_and_optimize(LoopOptsMode mode) {
     C->restore_major_progress(old_progress);
 
     // Cleanup any modified bits
+    _igvn.optimize();
+
+    if (C->log() != NULL) {
+      log_loop_tree(_ltree_root, _ltree_root, C->log());
+    }
+    return;
+  }
+
+  if (mode == LoopOptsMaxUnroll) {
+    for (LoopTreeIterator iter(_ltree_root); !iter.done(); iter.next()) {
+      IdealLoopTree* lpt = iter.current();
+      if (lpt->is_innermost() && lpt->_allow_optimizations && !lpt->_has_call && lpt->is_counted()) {
+        lpt->compute_trip_count(this);
+        if (!lpt->do_one_iteration_loop(this) &&
+            !lpt->do_remove_empty_loop(this)) {
+          AutoNodeBudget node_budget(this);
+          if (lpt->_head->as_CountedLoop()->is_normal_loop() &&
+              lpt->policy_maximally_unroll(this)) {
+            memset( worklist.adr(), 0, worklist.Size()*sizeof(Node*) );
+            do_maximally_unroll(lpt, worklist);
+          }
+        }
+      }
+    }
+
+    C->restore_major_progress(old_progress);
+
     _igvn.optimize();
 
     if (C->log() != NULL) {
@@ -3391,10 +3432,7 @@ void IdealLoopTree::verify_tree(IdealLoopTree *loop, const IdealLoopTree *parent
 void PhaseIdealLoop::set_idom(Node* d, Node* n, uint dom_depth) {
   uint idx = d->_idx;
   if (idx >= _idom_size) {
-    uint newsize = _idom_size<<1;
-    while( idx >= newsize ) {
-      newsize <<= 1;
-    }
+    uint newsize = next_power_of_2(idx);
     _idom      = REALLOC_RESOURCE_ARRAY( Node*,     _idom,_idom_size,newsize);
     _dom_depth = REALLOC_RESOURCE_ARRAY( uint, _dom_depth,_idom_size,newsize);
     memset( _dom_depth + _idom_size, 0, (newsize - _idom_size) * sizeof(uint) );
@@ -4059,8 +4097,16 @@ Node *PhaseIdealLoop::get_late_ctrl( Node *n, Node *early ) {
           }
         } else {
           Node *sctrl = has_ctrl(s) ? get_ctrl(s) : s->in(0);
-          assert(sctrl != NULL || s->outcnt() == 0, "must have control");
-          if (sctrl != NULL && !sctrl->is_top() && C->can_alias(s->adr_type(), load_alias_idx) && is_dominator(early, sctrl)) {
+          const TypePtr* adr_type = s->adr_type();
+          if (s->is_ArrayCopy()) {
+            // Copy to known instance needs destination type to test for aliasing
+            const TypePtr* dest_type = s->as_ArrayCopy()->_dest_type;
+            if (dest_type != TypeOopPtr::BOTTOM) {
+              adr_type = dest_type;
+            }
+          }
+          assert(sctrl != NULL || !s->is_reachable_from_root(), "must have control");
+          if (sctrl != NULL && !sctrl->is_top() && C->can_alias(adr_type, load_alias_idx) && is_dominator(early, sctrl)) {
             LCA = dom_lca_for_get_late_ctrl(LCA, sctrl, n);
           }
         }
@@ -4268,12 +4314,6 @@ void PhaseIdealLoop::verify_strip_mined_scheduling(Node *n, Node* least) {
 // Put Data nodes into some loop nest, by setting the _nodes[]->loop mapping.
 // Second pass finds latest legal placement, and ideal loop placement.
 void PhaseIdealLoop::build_loop_late_post(Node *n) {
-  BarrierSetC2* bs = BarrierSet::barrier_set()->barrier_set_c2();
-
-  if (bs->build_loop_late_post(this, n)) {
-    return;
-  }
-
   build_loop_late_post_work(n, true);
 }
 
@@ -4326,6 +4366,9 @@ void PhaseIdealLoop::build_loop_late_post_work(Node *n, bool pinned) {
     case Op_StrIndexOfChar:
     case Op_AryEq:
     case Op_HasNegatives:
+      pinned = false;
+    }
+    if (n->is_CMove()) {
       pinned = false;
     }
     if( pinned ) {

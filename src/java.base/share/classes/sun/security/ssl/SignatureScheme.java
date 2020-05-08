@@ -274,17 +274,28 @@ enum SignatureScheme {
                 Arrays.asList(handshakeSupportedProtocols);
 
         boolean mediator = true;
-        if (signAlgParams != null) {
-            mediator = signAlgParams.isAvailable;
-        } else {
-            try {
-                Signature.getInstance(algorithm);
-            } catch (Exception e) {
-                mediator = false;
-                if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
-                    SSLLogger.warning(
-                        "Signature algorithm, " + algorithm +
-                        ", is not supported by the underlying providers");
+        // An EC provider, for example the SunEC provider, may support
+        // AlgorithmParameters but not KeyPairGenerator or Signature.
+        //
+        // Note: Please be careful if removing this block!
+        if ("EC".equals(keyAlgorithm)) {
+            mediator = JsseJce.isEcAvailable();
+        }
+
+        // Check the specific algorithm and parameters.
+        if (mediator) {
+            if (signAlgParams != null) {
+                mediator = signAlgParams.isAvailable;
+            } else {
+                try {
+                    Signature.getInstance(algorithm);
+                } catch (Exception e) {
+                    mediator = false;
+                    if (SSLLogger.isOn && SSLLogger.isOn("ssl,handshake")) {
+                        SSLLogger.warning(
+                            "Signature algorithm, " + algorithm +
+                            ", is not supported by the underlying providers");
+                    }
                 }
             }
         }
@@ -328,6 +339,17 @@ enum SignatureScheme {
         return signName + "_" + hashName;
     }
 
+    // Note: the signatureSchemeName is not case-sensitive.
+    static SignatureScheme nameOf(String signatureSchemeName) {
+        for (SignatureScheme ss: SignatureScheme.values()) {
+            if (ss.name.equalsIgnoreCase(signatureSchemeName)) {
+                return ss;
+            }
+        }
+
+        return null;
+    }
+
     // Return the size of a SignatureScheme structure in TLS record
     static int sizeInRecord() {
         return 2;
@@ -348,11 +370,19 @@ enum SignatureScheme {
     // Get local supported algorithm collection complying to algorithm
     // constraints.
     static List<SignatureScheme> getSupportedAlgorithms(
+            SSLConfiguration config,
             AlgorithmConstraints constraints,
             List<ProtocolVersion> activeProtocols) {
         List<SignatureScheme> supported = new LinkedList<>();
         for (SignatureScheme ss: SignatureScheme.values()) {
-            if (!ss.isAvailable) {
+            if (!ss.isAvailable ||
+                    (!config.signatureSchemes.isEmpty() &&
+                        !config.signatureSchemes.contains(ss))) {
+                if (SSLLogger.isOn &&
+                        SSLLogger.isOn("ssl,handshake,verbose")) {
+                    SSLLogger.finest(
+                        "Ignore unsupported signature scheme: " + ss.name);
+                }
                 continue;
             }
 
@@ -383,6 +413,7 @@ enum SignatureScheme {
     }
 
     static List<SignatureScheme> getSupportedAlgorithms(
+            SSLConfiguration config,
             AlgorithmConstraints constraints,
             ProtocolVersion protocolVersion, int[] algorithmIds) {
         List<SignatureScheme> supported = new LinkedList<>();
@@ -396,6 +427,8 @@ enum SignatureScheme {
                 }
             } else if (ss.isAvailable &&
                     ss.supportedProtocols.contains(protocolVersion) &&
+                    (config.signatureSchemes.isEmpty() ||
+                        config.signatureSchemes.contains(ss)) &&
                     ss.isPermitted(constraints)) {
                 supported.add(ss);
             } else {

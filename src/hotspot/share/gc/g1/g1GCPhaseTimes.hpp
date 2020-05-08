@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -76,8 +76,11 @@ class G1GCPhaseTimes : public CHeapObj<mtGC> {
     StringDedupQueueFixup,
     StringDedupTableFixup,
     RedirtyCards,
+    ParFreeCSet,
     YoungFreeCSet,
     NonYoungFreeCSet,
+    RebuildFreeList,
+    MergePSS,
     GCParPhasesSentinel
   };
 
@@ -87,7 +90,8 @@ class G1GCPhaseTimes : public CHeapObj<mtGC> {
   enum GCMergeRSWorkTimes {
     MergeRSMergedSparse,
     MergeRSMergedFine,
-    MergeRSMergedCoarse
+    MergeRSMergedCoarse,
+    MergeRSDirtyCards
   };
 
   enum GCScanHRWorkItems {
@@ -108,9 +112,10 @@ class G1GCPhaseTimes : public CHeapObj<mtGC> {
     MergeLBSkippedCards
   };
 
-  enum GCObjCopyWorkItems {
-    ObjCopyLABWaste,
-    ObjCopyLABUndoWaste
+  enum GCMergePSSWorkItems {
+    MergePSSCopiedBytes,
+    MergePSSLABWasteBytes,
+    MergePSSLABUndoWasteBytes
   };
 
  private:
@@ -118,42 +123,6 @@ class G1GCPhaseTimes : public CHeapObj<mtGC> {
   static const int GCMainParPhasesLast = GCWorkerEnd;
 
   WorkerDataArray<double>* _gc_par_phases[GCParPhasesSentinel];
-
-  WorkerDataArray<size_t>* _merge_rs_merged_sparse;
-  WorkerDataArray<size_t>* _merge_rs_merged_fine;
-  WorkerDataArray<size_t>* _merge_rs_merged_coarse;
-
-  WorkerDataArray<size_t>* _merge_hcc_dirty_cards;
-  WorkerDataArray<size_t>* _merge_hcc_skipped_cards;
-
-  WorkerDataArray<size_t>* _merge_lb_dirty_cards;
-  WorkerDataArray<size_t>* _merge_lb_skipped_cards;
-
-  WorkerDataArray<size_t>* _scan_hr_scanned_cards;
-  WorkerDataArray<size_t>* _scan_hr_scanned_blocks;
-  WorkerDataArray<size_t>* _scan_hr_claimed_chunks;
-
-  WorkerDataArray<size_t>* _opt_merge_rs_merged_sparse;
-  WorkerDataArray<size_t>* _opt_merge_rs_merged_fine;
-  WorkerDataArray<size_t>* _opt_merge_rs_merged_coarse;
-
-  WorkerDataArray<size_t>* _opt_scan_hr_scanned_cards;
-  WorkerDataArray<size_t>* _opt_scan_hr_scanned_blocks;
-  WorkerDataArray<size_t>* _opt_scan_hr_claimed_chunks;
-  WorkerDataArray<size_t>* _opt_scan_hr_scanned_opt_refs;
-  WorkerDataArray<size_t>* _opt_scan_hr_used_memory;
-
-  WorkerDataArray<size_t>* _obj_copy_lab_waste;
-  WorkerDataArray<size_t>* _obj_copy_lab_undo_waste;
-
-  WorkerDataArray<size_t>* _opt_obj_copy_lab_waste;
-  WorkerDataArray<size_t>* _opt_obj_copy_lab_undo_waste;
-
-  WorkerDataArray<size_t>* _termination_attempts;
-
-  WorkerDataArray<size_t>* _opt_termination_attempts;
-
-  WorkerDataArray<size_t>* _redirtied_cards;
 
   double _cur_collection_initial_evac_time_ms;
   double _cur_optional_evac_time_ms;
@@ -173,6 +142,8 @@ class G1GCPhaseTimes : public CHeapObj<mtGC> {
 
   double _cur_prepare_tlab_time_ms;
   double _cur_resize_tlab_time_ms;
+
+  double _cur_concatenate_dirty_card_logs_time_ms;
 
   double _cur_derived_pointer_table_update_time_ms;
 
@@ -204,6 +175,10 @@ class G1GCPhaseTimes : public CHeapObj<mtGC> {
 
   double _recorded_serial_free_cset_time_ms;
 
+  double _recorded_total_rebuild_freelist_time_ms;
+
+  double _recorded_serial_rebuild_freelist_time_ms;
+
   double _cur_region_register_time;
 
   double _cur_fast_reclaim_humongous_time_ms;
@@ -222,11 +197,13 @@ class G1GCPhaseTimes : public CHeapObj<mtGC> {
   void reset();
 
   template <class T>
-  void details(T* phase, const char* indent) const;
+  void details(T* phase, const char* indent_str) const;
 
-  void log_phase(WorkerDataArray<double>* phase, uint indent, outputStream* out, bool print_sum) const;
+  void log_work_items(WorkerDataArray<double>* phase, uint indent, outputStream* out) const;
+  void log_phase(WorkerDataArray<double>* phase, uint indent_level, outputStream* out, bool print_sum) const;
+  void debug_serial_phase(WorkerDataArray<double>* phase, uint extra_indent = 0) const;
   void debug_phase(WorkerDataArray<double>* phase, uint extra_indent = 0) const;
-  void trace_phase(WorkerDataArray<double>* phase, bool print_sum = true) const;
+  void trace_phase(WorkerDataArray<double>* phase, bool print_sum = true, uint extra_indent = 0) const;
 
   void info_time(const char* name, double value) const;
   void debug_time(const char* name, double value) const;
@@ -269,14 +246,16 @@ class G1GCPhaseTimes : public CHeapObj<mtGC> {
 
   size_t sum_thread_work_items(GCParPhases phase, uint index = 0);
 
- public:
-
   void record_prepare_tlab_time_ms(double ms) {
     _cur_prepare_tlab_time_ms = ms;
   }
 
   void record_resize_tlab_time_ms(double ms) {
     _cur_resize_tlab_time_ms = ms;
+  }
+
+  void record_concatenate_dirty_card_logs_time_ms(double ms) {
+    _cur_concatenate_dirty_card_logs_time_ms = ms;
   }
 
   void record_derived_pointer_table_update_time(double ms) {
@@ -351,6 +330,14 @@ class G1GCPhaseTimes : public CHeapObj<mtGC> {
     _recorded_serial_free_cset_time_ms = time_ms;
   }
 
+  void record_total_rebuild_freelist_time_ms(double time_ms) {
+    _recorded_total_rebuild_freelist_time_ms = time_ms;
+  }
+
+  void record_serial_rebuild_freelist_time_ms(double time_ms) {
+    _recorded_serial_rebuild_freelist_time_ms = time_ms;
+  }
+
   void record_register_regions(double time_ms, size_t total, size_t candidates) {
     _cur_region_register_time = time_ms;
     _cur_fast_reclaim_humongous_total = total;
@@ -376,10 +363,6 @@ class G1GCPhaseTimes : public CHeapObj<mtGC> {
 
   void record_preserve_cm_referents_time_ms(double time_ms) {
     _recorded_preserve_cm_referents_time_ms = time_ms;
-  }
-
-  void record_merge_pss_time_ms(double time_ms) {
-    _recorded_merge_pss_time_ms = time_ms;
   }
 
   void record_start_new_cset_time_ms(double time_ms) {
@@ -436,6 +419,10 @@ class G1GCPhaseTimes : public CHeapObj<mtGC> {
 
   double total_free_cset_time_ms() {
     return _recorded_total_free_cset_time_ms;
+  }
+
+  double total_rebuild_freelist_time_ms() {
+    return _recorded_total_rebuild_freelist_time_ms;
   }
 
   double non_young_cset_choice_time_ms() {

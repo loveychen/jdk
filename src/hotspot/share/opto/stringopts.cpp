@@ -1200,7 +1200,7 @@ Node* PhaseStringOpts::int_stringSize(GraphKit& kit, Node* arg) {
     //     return i+1;
 
     // Add loop predicate first.
-    kit.add_predicate();
+    kit.add_empty_predicates();
 
     RegionNode *loop = new RegionNode(3);
     loop->init_req(1, kit.control());
@@ -1212,7 +1212,6 @@ Node* PhaseStringOpts::int_stringSize(GraphKit& kit, Node* arg) {
     kit.set_control(loop);
     Node* sizeTable = fetch_static_field(kit, size_table_field);
 
-    sizeTable = kit.access_resolve(sizeTable, ACCESS_READ);
     Node* value = kit.load_array_element(NULL, sizeTable, index, TypeAryPtr::INTS);
     C->record_for_igvn(value);
     Node* limit = __ CmpI(phi, value);
@@ -1277,7 +1276,7 @@ void PhaseStringOpts::getChars(GraphKit& kit, Node* arg, Node* dst_array, BasicT
   // }
 
   // Add loop predicate first.
-  kit.add_predicate();
+  kit.add_empty_predicates();
 
   RegionNode* head = new RegionNode(3);
   head->init_req(1, kit.control());
@@ -1548,7 +1547,6 @@ void PhaseStringOpts::copy_constant_string(GraphKit& kit, IdealKit& ideal, ciTyp
 // Compress copy contents of the byte/char String str into dst_array starting at index start.
 Node* PhaseStringOpts::copy_string(GraphKit& kit, Node* str, Node* dst_array, Node* dst_coder, Node* start) {
   Node* src_array = kit.load_String_value(str, true);
-  src_array = kit.access_resolve(src_array, ACCESS_READ);
 
   IdealKit ideal(&kit, true, true);
   IdealVariable count(ideal); __ declarations_done();

@@ -30,6 +30,7 @@
 #include "interpreter/linkResolver.hpp"
 #include "interpreter/rewriter.hpp"
 #include "logging/log.hpp"
+#include "logging/logStream.hpp"
 #include "memory/heapShared.hpp"
 #include "memory/metadataFactory.hpp"
 #include "memory/metaspaceClosure.hpp"
@@ -44,7 +45,6 @@
 #include "prims/methodHandles.hpp"
 #include "runtime/atomic.hpp"
 #include "runtime/handles.inline.hpp"
-#include "runtime/orderAccess.hpp"
 #include "utilities/macros.hpp"
 
 // Implementation of ConstantPoolCacheEntry
@@ -97,7 +97,7 @@ void ConstantPoolCacheEntry::set_bytecode_1(Bytecodes::Code code) {
   assert(c == 0 || c == code || code == 0, "update must be consistent");
 #endif
   // Need to flush pending stores here before bytecode is written.
-  OrderAccess::release_store(&_indices, _indices | ((u_char)code << bytecode_1_shift));
+  Atomic::release_store(&_indices, _indices | ((u_char)code << bytecode_1_shift));
 }
 
 void ConstantPoolCacheEntry::set_bytecode_2(Bytecodes::Code code) {
@@ -107,17 +107,17 @@ void ConstantPoolCacheEntry::set_bytecode_2(Bytecodes::Code code) {
   assert(c == 0 || c == code || code == 0, "update must be consistent");
 #endif
   // Need to flush pending stores here before bytecode is written.
-  OrderAccess::release_store(&_indices, _indices | ((u_char)code << bytecode_2_shift));
+  Atomic::release_store(&_indices, _indices | ((u_char)code << bytecode_2_shift));
 }
 
 // Sets f1, ordering with previous writes.
 void ConstantPoolCacheEntry::release_set_f1(Metadata* f1) {
   assert(f1 != NULL, "");
-  OrderAccess::release_store(&_f1, f1);
+  Atomic::release_store(&_f1, f1);
 }
 
 void ConstantPoolCacheEntry::set_indy_resolution_failed() {
-  OrderAccess::release_store(&_flags, _flags | (1 << indy_resolution_failed_shift));
+  Atomic::release_store(&_flags, _flags | (1 << indy_resolution_failed_shift));
 }
 
 // Note that concurrent update of both bytecodes can leave one of them
@@ -159,7 +159,7 @@ void ConstantPoolCacheEntry::set_parameter_size(int value) {
   // sure that the final parameter size agrees with what was passed.
   if (_flags == 0) {
     intx newflags = (value & parameter_size_mask);
-    Atomic::cmpxchg(newflags, &_flags, (intx)0);
+    Atomic::cmpxchg(&_flags, (intx)0, newflags);
   }
   guarantee(parameter_size() == value,
             "size must not change: parameter_size=%d, value=%d", parameter_size(), value);
@@ -413,15 +413,18 @@ void ConstantPoolCacheEntry::set_method_handle_common(const constantPoolHandle& 
                    (                   1      << is_final_shift            ),
                    adapter->size_of_parameters());
 
-  if (TraceInvokeDynamic) {
-    ttyLocker ttyl;
-    tty->print_cr("set_method_handle bc=%d appendix=" PTR_FORMAT "%s method=" PTR_FORMAT " (local signature) ",
-                  invoke_code,
-                  p2i(appendix()),
-                  (has_appendix ? "" : " (unused)"),
-                  p2i(adapter));
-    adapter->print();
-    if (has_appendix)  appendix()->print();
+  LogStream* log_stream = NULL;
+  LogStreamHandle(Debug, methodhandles, indy) lsh_indy;
+  if (lsh_indy.is_enabled()) {
+    ResourceMark rm;
+    log_stream = &lsh_indy;
+    log_stream->print_cr("set_method_handle bc=%d appendix=" PTR_FORMAT "%s method=" PTR_FORMAT " (local signature) ",
+                         invoke_code,
+                         p2i(appendix()),
+                         (has_appendix ? "" : " (unused)"),
+                         p2i(adapter));
+    adapter->print_on(log_stream);
+    if (has_appendix)  appendix()->print_on(log_stream);
   }
 
   // Method handle invokes and invokedynamic sites use both cp cache words.
@@ -457,9 +460,9 @@ void ConstantPoolCacheEntry::set_method_handle_common(const constantPoolHandle& 
   // but it is used by is_resolved, method_if_resolved, etc.
   set_bytecode_1(invoke_code);
   NOT_PRODUCT(verify(tty));
-  if (TraceInvokeDynamic) {
-    ttyLocker ttyl;
-    this->print(tty, 0);
+
+  if (log_stream != NULL) {
+    this->print(log_stream, 0);
   }
 
   assert(has_appendix == this->has_appendix(), "proper storage of appendix flag");

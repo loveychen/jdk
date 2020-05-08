@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1999, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -33,10 +33,10 @@
 #include "compiler/compilationPolicy.hpp"
 #include "compiler/compileBroker.hpp"
 #include "compiler/compileLog.hpp"
+#include "compiler/compilerEvent.hpp"
 #include "compiler/compilerOracle.hpp"
 #include "compiler/directivesParser.hpp"
 #include "interpreter/linkResolver.hpp"
-#include "jfr/jfrEvents.hpp"
 #include "logging/log.hpp"
 #include "logging/logStream.hpp"
 #include "memory/allocation.inline.hpp"
@@ -266,7 +266,7 @@ CompileTaskWrapper::~CompileTaskWrapper() {
   if (task->is_blocking()) {
     bool free_task = false;
     {
-      MutexLocker notifier(task->lock(), thread);
+      MutexLocker notifier(thread, task->lock());
       task->mark_complete();
 #if INCLUDE_JVMCI
       if (CompileBroker::compiler(task->comp_level())->is_jvmci()) {
@@ -592,11 +592,41 @@ CompilerCounters::CompilerCounters() {
   _compile_type = CompileBroker::no_compile;
 }
 
+#if INCLUDE_JFR && COMPILER2_OR_JVMCI
+// It appends new compiler phase names to growable array phase_names(a new CompilerPhaseType mapping
+// in compiler/compilerEvent.cpp) and registers it with its serializer.
+//
+// c2 uses explicit CompilerPhaseType idToPhase mapping in opto/phasetype.hpp,
+// so if c2 is used, it should be always registered first.
+// This function is called during vm initialization.
+void register_jfr_phasetype_serializer(CompilerType compiler_type) {
+  ResourceMark rm;
+  static bool first_registration = true;
+  if (compiler_type == compiler_jvmci) {
+    // register serializer, phases will be added later lazily.
+    GrowableArray<const char*>* jvmci_phase_names = new GrowableArray<const char*>(1);
+    jvmci_phase_names->append("NOT_A_PHASE_NAME");
+    CompilerEvent::PhaseEvent::register_phases(jvmci_phase_names);
+    first_registration = false;
+#ifdef COMPILER2
+  } else if (compiler_type == compiler_c2) {
+    assert(first_registration, "invariant"); // c2 must be registered first.
+    GrowableArray<const char*>* c2_phase_names = new GrowableArray<const char*>(PHASE_NUM_TYPES);
+    for (int i = 0; i < PHASE_NUM_TYPES; i++) {
+      c2_phase_names->append(CompilerPhaseTypeHelper::to_string((CompilerPhaseType)i));
+    }
+    CompilerEvent::PhaseEvent::register_phases(c2_phase_names);
+    first_registration = false;
+#endif // COMPILER2
+  }
+}
+#endif // INCLUDE_JFR && COMPILER2_OR_JVMCI
+
 // ------------------------------------------------------------------
 // CompileBroker::compilation_init
 //
 // Initialize the Compilation object
-void CompileBroker::compilation_init_phase1(TRAPS) {
+void CompileBroker::compilation_init_phase1(Thread* THREAD) {
   // No need to initialize compilation system if we do not use it.
   if (!UseCompiler) {
     return;
@@ -638,15 +668,27 @@ void CompileBroker::compilation_init_phase1(TRAPS) {
   if (true JVMCI_ONLY( && !UseJVMCICompiler)) {
     if (_c2_count > 0) {
       _compilers[1] = new C2Compiler();
+      // Register c2 first as c2 CompilerPhaseType idToPhase mapping is explicit.
+      // idToPhase mapping for c2 is in opto/phasetype.hpp
+      JFR_ONLY(register_jfr_phasetype_serializer(compiler_c2);)
     }
   }
 #endif // COMPILER2
+
+#if INCLUDE_JVMCI
+   // Register after c2 registration.
+   // JVMCI CompilerPhaseType idToPhase mapping is dynamic.
+   if (EnableJVMCI) {
+     JFR_ONLY(register_jfr_phasetype_serializer(compiler_jvmci);)
+   }
+#endif // INCLUDE_JVMCI
 
   // Start the compiler thread(s) and the sweeper thread
   init_compiler_sweeper_threads();
   // totalTime performance counter is always created as it is required
   // by the implementation of java.lang.management.CompilationMBean.
   {
+    // Ensure OOM leads to vm_exit_during_initialization.
     EXCEPTION_MARK;
     _perf_total_compilation =
                  PerfDataManager::create_counter(JAVA_CI, "totalTime",
@@ -761,17 +803,17 @@ Handle CompileBroker::create_thread_oop(const char* name, TRAPS) {
 }
 
 
-JavaThread* CompileBroker::make_thread(jobject thread_handle, CompileQueue* queue, AbstractCompiler* comp, TRAPS) {
-  JavaThread* thread = NULL;
+JavaThread* CompileBroker::make_thread(jobject thread_handle, CompileQueue* queue, AbstractCompiler* comp, Thread* THREAD) {
+  JavaThread* new_thread = NULL;
   {
-    MutexLocker mu(Threads_lock, THREAD);
+    MutexLocker mu(THREAD, Threads_lock);
     if (comp != NULL) {
       if (!InjectCompilerCreationFailure || comp->num_compiler_threads() == 0) {
         CompilerCounters* counters = new CompilerCounters();
-        thread = new CompilerThread(queue, counters);
+        new_thread = new CompilerThread(queue, counters);
       }
     } else {
-      thread = new CodeCacheSweeperThread();
+      new_thread = new CodeCacheSweeperThread();
     }
     // At this point the new CompilerThread data-races with this startup
     // thread (which I believe is the primoridal thread and NOT the VM
@@ -786,9 +828,9 @@ JavaThread* CompileBroker::make_thread(jobject thread_handle, CompileQueue* queu
     // exceptions anyway, check and abort if this fails. But first release the
     // lock.
 
-    if (thread != NULL && thread->osthread() != NULL) {
+    if (new_thread != NULL && new_thread->osthread() != NULL) {
 
-      java_lang_Thread::set_thread(JNIHandles::resolve_non_null(thread_handle), thread);
+      java_lang_Thread::set_thread(JNIHandles::resolve_non_null(thread_handle), new_thread);
 
       // Note that this only sets the JavaThread _priority field, which by
       // definition is limited to Java priorities and not OS priorities.
@@ -809,24 +851,24 @@ JavaThread* CompileBroker::make_thread(jobject thread_handle, CompileQueue* queu
           native_prio = os::java_to_os_priority[NearMaxPriority];
         }
       }
-      os::set_native_priority(thread, native_prio);
+      os::set_native_priority(new_thread, native_prio);
 
       java_lang_Thread::set_daemon(JNIHandles::resolve_non_null(thread_handle));
 
-      thread->set_threadObj(JNIHandles::resolve_non_null(thread_handle));
+      new_thread->set_threadObj(JNIHandles::resolve_non_null(thread_handle));
       if (comp != NULL) {
-        thread->as_CompilerThread()->set_compiler(comp);
+        new_thread->as_CompilerThread()->set_compiler(comp);
       }
-      Threads::add(thread);
-      Thread::start(thread);
+      Threads::add(new_thread);
+      Thread::start(new_thread);
     }
   }
 
   // First release lock before aborting VM.
-  if (thread == NULL || thread->osthread() == NULL) {
+  if (new_thread == NULL || new_thread->osthread() == NULL) {
     if (UseDynamicNumberOfCompilerThreads && comp != NULL && comp->num_compiler_threads() > 0) {
-      if (thread != NULL) {
-        thread->smr_delete();
+      if (new_thread != NULL) {
+        new_thread->smr_delete();
       }
       return NULL;
     }
@@ -837,11 +879,12 @@ JavaThread* CompileBroker::make_thread(jobject thread_handle, CompileQueue* queu
   // Let go of Threads_lock before yielding
   os::naked_yield(); // make sure that the compiler thread is started early (especially helpful on SOLARIS)
 
-  return thread;
+  return new_thread;
 }
 
 
 void CompileBroker::init_compiler_sweeper_threads() {
+  // Ensure any exceptions lead to vm_exit_during_initialization.
   EXCEPTION_MARK;
 #if !defined(ZERO)
   assert(_c2_count > 0 || _c1_count > 0, "No compilers?");
@@ -875,7 +918,7 @@ void CompileBroker::init_compiler_sweeper_threads() {
     _compiler2_logs[i] = NULL;
 
     if (!UseDynamicNumberOfCompilerThreads || i == 0) {
-      JavaThread *ct = make_thread(thread_handle, _c2_compile_queue, _compilers[1], CHECK);
+      JavaThread *ct = make_thread(thread_handle, _c2_compile_queue, _compilers[1], THREAD);
       assert(ct != NULL, "should have been handled for initial thread");
       _compilers[1]->set_num_compiler_threads(i + 1);
       if (TraceCompilerThreads) {
@@ -895,7 +938,7 @@ void CompileBroker::init_compiler_sweeper_threads() {
     _compiler1_logs[i] = NULL;
 
     if (!UseDynamicNumberOfCompilerThreads || i == 0) {
-      JavaThread *ct = make_thread(thread_handle, _c1_compile_queue, _compilers[0], CHECK);
+      JavaThread *ct = make_thread(thread_handle, _c1_compile_queue, _compilers[0], THREAD);
       assert(ct != NULL, "should have been handled for initial thread");
       _compilers[0]->set_num_compiler_threads(i + 1);
       if (TraceCompilerThreads) {
@@ -914,12 +957,11 @@ void CompileBroker::init_compiler_sweeper_threads() {
     // Initialize the sweeper thread
     Handle thread_oop = create_thread_oop("Sweeper thread", CHECK);
     jobject thread_handle = JNIHandles::make_local(THREAD, thread_oop());
-    make_thread(thread_handle, NULL, NULL, CHECK);
+    make_thread(thread_handle, NULL, NULL, THREAD);
   }
 }
 
-void CompileBroker::possibly_add_compiler_threads() {
-  EXCEPTION_MARK;
+void CompileBroker::possibly_add_compiler_threads(Thread* THREAD) {
 
   julong available_memory = os::available_memory();
   // If SegmentedCodeCache is off, both values refer to the single heap (with type CodeBlobType::All).
@@ -970,7 +1012,7 @@ void CompileBroker::possibly_add_compiler_threads() {
         _compiler2_objects[i] = thread_handle;
       }
 #endif
-      JavaThread *ct = make_thread(compiler2_object(i), _c2_compile_queue, _compilers[1], CHECK);
+      JavaThread *ct = make_thread(compiler2_object(i), _c2_compile_queue, _compilers[1], THREAD);
       if (ct == NULL) break;
       _compilers[1]->set_num_compiler_threads(i + 1);
       if (TraceCompilerThreads) {
@@ -990,7 +1032,7 @@ void CompileBroker::possibly_add_compiler_threads() {
         (int)(available_cc_p / (128*K)));
 
     for (int i = old_c1_count; i < new_c1_count; i++) {
-      JavaThread *ct = make_thread(compiler1_object(i), _c1_compile_queue, _compilers[0], CHECK);
+      JavaThread *ct = make_thread(compiler1_object(i), _c1_compile_queue, _compilers[0], THREAD);
       if (ct == NULL) break;
       _compilers[0]->set_num_compiler_threads(i + 1);
       if (TraceCompilerThreads) {
@@ -1101,7 +1143,7 @@ void CompileBroker::compile_method_base(const methodHandle& method,
 
   // Acquire our lock.
   {
-    MutexLocker locker(MethodCompileQueue_lock, thread);
+    MutexLocker locker(thread, MethodCompileQueue_lock);
 
     // Make sure the method has not slipped into the queues since
     // last we checked; note that those checks were "fast bail-outs".
@@ -1327,6 +1369,7 @@ nmethod* CompileBroker::compile_method(const methodHandle& method, int osr_bci,
   // do the compilation
   if (method->is_native()) {
     if (!PreferInterpreterNativeStubs || method->is_method_handle_intrinsic()) {
+#if defined(X86) && !defined(ZERO)
       // The following native methods:
       //
       // java.lang.Float.intBitsToFloat
@@ -1348,6 +1391,7 @@ nmethod* CompileBroker::compile_method(const methodHandle& method, int osr_bci,
             method->intrinsic_id() == vmIntrinsics::_doubleToRawLongBits))) {
         return NULL;
       }
+#endif // X86 && !ZERO
 
       // To properly handle the appendix argument for out-of-line calls we are using a small trampoline that
       // pops off the appendix argument and jumps to the target (see gen_special_dispatch in SharedRuntime).
@@ -1478,14 +1522,14 @@ int CompileBroker::assign_compile_id(const methodHandle& method, int osr_bci) {
     assert(!is_osr, "can't be osr");
     // Adapters, native wrappers and method handle intrinsics
     // should be generated always.
-    return Atomic::add(1, &_compilation_id);
+    return Atomic::add(&_compilation_id, 1);
   } else if (CICountOSR && is_osr) {
-    id = Atomic::add(1, &_osr_compilation_id);
+    id = Atomic::add(&_osr_compilation_id, 1);
     if (CIStartOSR <= id && id < CIStopOSR) {
       return id;
     }
   } else {
-    id = Atomic::add(1, &_compilation_id);
+    id = Atomic::add(&_compilation_id, 1);
     if (CIStart <= id && id < CIStop) {
       return id;
     }
@@ -1497,7 +1541,7 @@ int CompileBroker::assign_compile_id(const methodHandle& method, int osr_bci) {
 #else
   // CICountOSR is a develop flag and set to 'false' by default. In a product built,
   // only _compilation_id is incremented.
-  return Atomic::add(1, &_compilation_id);
+  return Atomic::add(&_compilation_id, 1);
 #endif
 }
 
@@ -1506,17 +1550,9 @@ int CompileBroker::assign_compile_id(const methodHandle& method, int osr_bci) {
 //
 // Public wrapper for assign_compile_id that acquires the needed locks
 uint CompileBroker::assign_compile_id_unlocked(Thread* thread, const methodHandle& method, int osr_bci) {
-  MutexLocker locker(MethodCompileQueue_lock, thread);
+  MutexLocker locker(thread, MethodCompileQueue_lock);
   return assign_compile_id(method, osr_bci);
 }
-
-// ------------------------------------------------------------------
-// CompileBroker::preload_classes
-void CompileBroker::preload_classes(const methodHandle& method, TRAPS) {
-  // Move this code over from c1_Compiler.cpp
-  ShouldNotReachHere();
-}
-
 
 // ------------------------------------------------------------------
 // CompileBroker::create_compile_task
@@ -1559,7 +1595,7 @@ static const int JVMCI_COMPILATION_PROGRESS_WAIT_ATTEMPTS = 10;
  * @return true if this thread needs to free/recycle the task
  */
 bool CompileBroker::wait_for_jvmci_completion(JVMCICompiler* jvmci, CompileTask* task, JavaThread* thread) {
-  MonitorLocker ml(task->lock(), thread);
+  MonitorLocker ml(thread, task->lock());
   int progress_wait_attempts = 0;
   int methods_compiled = jvmci->methods_compiled();
   while (!task->is_complete() && !is_compilation_disabled_forever() &&
@@ -1620,7 +1656,7 @@ void CompileBroker::wait_for_completion(CompileTask* task) {
   } else
 #endif
   {
-    MonitorLocker ml(task->lock(), thread);
+    MonitorLocker ml(thread, task->lock());
     free_task = true;
     while (!task->is_complete() && !is_compilation_disabled_forever()) {
       ml.wait();
@@ -1790,7 +1826,7 @@ void CompileBroker::compiler_thread_loop() {
 
   {
     ASSERT_IN_VM;
-    MutexLocker only_one (CompileThread_lock, thread);
+    MutexLocker only_one (thread, CompileThread_lock);
     if (!ciObjectFactory::is_initialized()) {
       ciObjectFactory::initialize();
     }
@@ -1865,7 +1901,8 @@ void CompileBroker::compiler_thread_loop() {
       }
 
       if (UseDynamicNumberOfCompilerThreads) {
-        possibly_add_compiler_threads();
+        possibly_add_compiler_threads(thread);
+        assert(!thread->has_pending_exception(), "should have been handled");
       }
     }
   }
@@ -2022,17 +2059,17 @@ void CompileBroker::post_compile(CompilerThread* thread, CompileTask* task, bool
   assert(task->compile_id() != CICrashAt, "just as planned");
 }
 
-static void post_compilation_event(EventCompilation* event, CompileTask* task) {
-  assert(event != NULL, "invariant");
-  assert(event->should_commit(), "invariant");
-  event->set_method(task->method());
-  event->set_compileId(task->compile_id());
-  event->set_compileLevel(task->comp_level());
-  event->set_succeded(task->is_success());
-  event->set_isOsr(task->osr_bci() != CompileBroker::standard_entry_bci);
-  event->set_codeSize((task->code() == NULL) ? 0 : task->code()->total_size());
-  event->set_inlinedBytes(task->num_inlined_bytecodes());
-  event->commit();
+static void post_compilation_event(EventCompilation& event, CompileTask* task) {
+  assert(task != NULL, "invariant");
+  CompilerEvent::CompilationEvent::post(event,
+                                        task->compile_id(),
+                                        task->compiler()->type(),
+                                        task->method(),
+                                        task->comp_level(),
+                                        task->is_success(),
+                                        task->osr_bci() != CompileBroker::standard_entry_bci,
+                                        (task->code() == NULL) ? 0 : task->code()->total_size(),
+                                        task->num_inlined_bytecodes());
 }
 
 int DirectivesStack::_depth = 0;
@@ -2131,7 +2168,7 @@ void CompileBroker::invoke_compiler_on_method(CompileTask* task) {
     }
     post_compile(thread, task, task->code() != NULL, NULL, compilable, failure_reason);
     if (event.should_commit()) {
-      post_compilation_event(&event, task);
+      post_compilation_event(event, task);
     }
 
   } else
@@ -2191,7 +2228,7 @@ void CompileBroker::invoke_compiler_on_method(CompileTask* task) {
 
     post_compile(thread, task, !ci_env.failing(), &ci_env, compilable, failure_reason);
     if (event.should_commit()) {
-      post_compilation_event(&event, task);
+      post_compilation_event(event, task);
     }
   }
   // Remove the JNI handle block after the ciEnv destructor has run in

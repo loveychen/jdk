@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -56,6 +56,7 @@
 #include "runtime/orderAccess.hpp"
 #include "runtime/osThread.hpp"
 #include "runtime/perfMemory.hpp"
+#include "runtime/safepointMechanism.hpp"
 #include "runtime/sharedRuntime.hpp"
 #include "runtime/statSampler.hpp"
 #include "runtime/stubRoutines.hpp"
@@ -1591,6 +1592,11 @@ void os::print_os_info_brief(outputStream* st) {
   os::print_os_info(st);
 }
 
+void os::win32::print_uptime_info(outputStream* st) {
+  unsigned long long ticks = GetTickCount64();
+  os::print_dhm(st, "OS uptime:", ticks/1000);
+}
+
 void os::print_os_info(outputStream* st) {
 #ifdef ASSERT
   char buffer[1024];
@@ -1603,6 +1609,8 @@ void os::print_os_info(outputStream* st) {
 #endif
   st->print("OS:");
   os::win32::print_windows_version(st);
+
+  os::win32::print_uptime_info(st);
 
 #ifdef _LP64
   VM_Version::print_platform_virtualization_info(st);
@@ -2096,7 +2104,7 @@ static int check_pending_signals() {
   while (true) {
     for (int i = 0; i < NSIG + 1; i++) {
       jint n = pending_signals[i];
-      if (n > 0 && n == Atomic::cmpxchg(n - 1, &pending_signals[i], n)) {
+      if (n > 0 && n == Atomic::cmpxchg(&pending_signals[i], n, n - 1)) {
         return i;
       }
     }
@@ -2524,7 +2532,7 @@ LONG WINAPI topLevelExceptionFilter(struct _EXCEPTION_POINTERS* exceptionInfo) {
         // the rest are checked explicitly now.
         CodeBlob* cb = CodeCache::find_blob(pc);
         if (cb != NULL) {
-          if (os::is_poll_address(addr)) {
+          if (SafepointMechanism::is_poll_address(addr)) {
             address stub = SharedRuntime::get_poll_stub(pc);
             return Handle_Exception(exceptionInfo, stub);
           }
@@ -2535,7 +2543,7 @@ LONG WINAPI topLevelExceptionFilter(struct _EXCEPTION_POINTERS* exceptionInfo) {
           //
           PEXCEPTION_RECORD exceptionRecord = exceptionInfo->ExceptionRecord;
           address addr = (address) exceptionRecord->ExceptionInformation[1];
-          if (addr > thread->stack_reserved_zone_base() && addr < thread->stack_base()) {
+          if (thread->is_in_usable_stack(addr)) {
             addr = (address)((uintptr_t)addr &
                              (~((uintptr_t)os::vm_page_size() - (uintptr_t)1)));
             os::commit_memory((char *)addr, thread->stack_base() - addr,
@@ -3169,8 +3177,8 @@ bool os::can_execute_large_page_memory() {
   return true;
 }
 
-char* os::reserve_memory_special(size_t bytes, size_t alignment, char* addr,
-                                 bool exec) {
+char* os::pd_reserve_memory_special(size_t bytes, size_t alignment, char* addr,
+                                    bool exec) {
   assert(UseLargePages, "only for large pages");
 
   if (!is_aligned(bytes, os::large_page_size()) || alignment > os::large_page_size()) {
@@ -3207,17 +3215,14 @@ char* os::reserve_memory_special(size_t bytes, size_t alignment, char* addr,
     // normal policy just allocate it all at once
     DWORD flag = MEM_RESERVE | MEM_COMMIT | MEM_LARGE_PAGES;
     char * res = (char *)VirtualAlloc(addr, bytes, flag, prot);
-    if (res != NULL) {
-      MemTracker::record_virtual_memory_reserve_and_commit((address)res, bytes, CALLER_PC);
-    }
 
     return res;
   }
 }
 
-bool os::release_memory_special(char* base, size_t bytes) {
+bool os::pd_release_memory_special(char* base, size_t bytes) {
   assert(base != NULL, "Sanity check");
-  return release_memory(base, bytes);
+  return pd_release_memory(base, bytes);
 }
 
 void os::print_statistics() {
@@ -3445,6 +3450,10 @@ size_t os::numa_get_leaf_groups(int *ids, size_t size) {
     }
     return size;
   }
+}
+
+int os::numa_get_group_id_for_address(const void* address) {
+  return 0;
 }
 
 bool os::get_page_info(char *start, page_info* info) {
@@ -3743,15 +3752,15 @@ int os::win32::exit_process_or_thread(Ept what, int exit_code) {
     // The first thread that reached this point, initializes the critical section.
     if (!InitOnceExecuteOnce(&init_once_crit_sect, init_crit_sect_call, &crit_sect, NULL)) {
       warning("crit_sect initialization failed in %s: %d\n", __FILE__, __LINE__);
-    } else if (OrderAccess::load_acquire(&process_exiting) == 0) {
+    } else if (Atomic::load_acquire(&process_exiting) == 0) {
       if (what != EPT_THREAD) {
         // Atomically set process_exiting before the critical section
         // to increase the visibility between racing threads.
-        Atomic::cmpxchg(GetCurrentThreadId(), &process_exiting, (DWORD)0);
+        Atomic::cmpxchg(&process_exiting, (DWORD)0, GetCurrentThreadId());
       }
       EnterCriticalSection(&crit_sect);
 
-      if (what == EPT_THREAD && OrderAccess::load_acquire(&process_exiting) == 0) {
+      if (what == EPT_THREAD && Atomic::load_acquire(&process_exiting) == 0) {
         // Remove from the array those handles of the threads that have completed exiting.
         for (i = 0, j = 0; i < handle_count; ++i) {
           res = WaitForSingleObject(handles[i], 0 /* don't wait */);
@@ -3864,7 +3873,7 @@ int os::win32::exit_process_or_thread(Ept what, int exit_code) {
     }
 
     if (!registered &&
-        OrderAccess::load_acquire(&process_exiting) != 0 &&
+        Atomic::load_acquire(&process_exiting) != 0 &&
         process_exiting != GetCurrentThreadId()) {
       // Some other thread is about to call exit(), so we don't let
       // the current unregistered thread proceed to exit() or _endthreadex()
@@ -4087,10 +4096,13 @@ jint os::init_2(void) {
     UseNUMA = false; // We don't fully support this yet
   }
 
-  if (UseNUMAInterleaving) {
-    // first check whether this Windows OS supports VirtualAllocExNuma, if not ignore this flag
-    bool success = numa_interleaving_init();
-    if (!success) UseNUMAInterleaving = false;
+  if (UseNUMAInterleaving || (UseNUMA && FLAG_IS_DEFAULT(UseNUMAInterleaving))) {
+    if (!numa_interleaving_init()) {
+      FLAG_SET_ERGO(UseNUMAInterleaving, false);
+    } else if (!UseNUMAInterleaving) {
+      // When NUMA requested, not-NUMA-aware allocations default to interleaving.
+      FLAG_SET_ERGO(UseNUMAInterleaving, true);
+    }
   }
 
   if (initSock() != JNI_OK) {
@@ -4105,24 +4117,6 @@ jint os::init_2(void) {
   }
 
   return JNI_OK;
-}
-
-// Mark the polling page as unreadable
-void os::make_polling_page_unreadable(void) {
-  DWORD old_status;
-  if (!VirtualProtect((char *)_polling_page, os::vm_page_size(),
-                      PAGE_NOACCESS, &old_status)) {
-    fatal("Could not disable polling page");
-  }
-}
-
-// Mark the polling page as readable
-void os::make_polling_page_readable(void) {
-  DWORD old_status;
-  if (!VirtualProtect((char *)_polling_page, os::vm_page_size(),
-                      PAGE_READONLY, &old_status)) {
-    fatal("Could not enable polling page");
-  }
 }
 
 // combine the high and low DWORD into a ULONGLONG
@@ -4150,98 +4144,121 @@ static void file_attribute_data_to_stat(struct stat* sbuf, WIN32_FILE_ATTRIBUTE_
   }
 }
 
+static errno_t convert_to_unicode(char const* char_path, LPWSTR* unicode_path) {
+  // Get required buffer size to convert to Unicode
+  int unicode_path_len = MultiByteToWideChar(CP_ACP,
+                                             MB_ERR_INVALID_CHARS,
+                                             char_path, -1,
+                                             NULL, 0);
+  if (unicode_path_len == 0) {
+    return EINVAL;
+  }
+
+  *unicode_path = NEW_C_HEAP_ARRAY(WCHAR, unicode_path_len, mtInternal);
+
+  int result = MultiByteToWideChar(CP_ACP,
+                                   MB_ERR_INVALID_CHARS,
+                                   char_path, -1,
+                                   *unicode_path, unicode_path_len);
+  assert(result == unicode_path_len, "length already checked above");
+
+  return ERROR_SUCCESS;
+}
+
+static errno_t get_full_path(LPCWSTR unicode_path, LPWSTR* full_path) {
+  // Get required buffer size to convert to full path. The return
+  // value INCLUDES the terminating null character.
+  DWORD full_path_len = GetFullPathNameW(unicode_path, 0, NULL, NULL);
+  if (full_path_len == 0) {
+    return EINVAL;
+  }
+
+  *full_path = NEW_C_HEAP_ARRAY(WCHAR, full_path_len, mtInternal);
+
+  // When the buffer has sufficient size, the return value EXCLUDES the
+  // terminating null character
+  DWORD result = GetFullPathNameW(unicode_path, full_path_len, *full_path, NULL);
+  assert(result <= full_path_len, "length already checked above");
+
+  return ERROR_SUCCESS;
+}
+
+static void set_path_prefix(char* buf, LPWSTR* prefix, int* prefix_off, bool* needs_fullpath) {
+  *prefix_off = 0;
+  *needs_fullpath = true;
+
+  if (::isalpha(buf[0]) && !::IsDBCSLeadByte(buf[0]) && buf[1] == ':' && buf[2] == '\\') {
+    *prefix = L"\\\\?\\";
+  } else if (buf[0] == '\\' && buf[1] == '\\') {
+    if (buf[2] == '?' && buf[3] == '\\') {
+      *prefix = L"";
+      *needs_fullpath = false;
+    } else {
+      *prefix = L"\\\\?\\UNC";
+      *prefix_off = 1; // Overwrite the first char with the prefix, so \\share\path becomes \\?\UNC\share\path
+    }
+  } else {
+    *prefix = L"\\\\?\\";
+  }
+}
+
 // Returns the given path as an absolute wide path in unc format. The returned path is NULL
 // on error (with err being set accordingly) and should be freed via os::free() otherwise.
-// additional_space is the number of additionally allocated wchars after the terminating L'\0'.
-// This is based on pathToNTPath() in io_util_md.cpp, but omits the optimizations for
-// short paths.
+// additional_space is the size of space, in wchar_t, the function will additionally add to
+// the allocation of return buffer (such that the size of the returned buffer is at least
+// wcslen(buf) + 1 + additional_space).
 static wchar_t* wide_abs_unc_path(char const* path, errno_t & err, int additional_space = 0) {
   if ((path == NULL) || (path[0] == '\0')) {
     err = ENOENT;
     return NULL;
   }
 
-  size_t path_len = strlen(path);
   // Need to allocate at least room for 3 characters, since os::native_path transforms C: to C:.
-  char* buf = (char*) os::malloc(1 + MAX2((size_t) 3, path_len), mtInternal);
-  wchar_t* result = NULL;
+  size_t buf_len = 1 + MAX2((size_t)3, strlen(path));
+  char* buf = NEW_C_HEAP_ARRAY(char, buf_len, mtInternal);
+  strncpy(buf, path, buf_len);
+  os::native_path(buf);
 
-  if (buf == NULL) {
-    err = ENOMEM;
-  } else {
-    memcpy(buf, path, path_len + 1);
-    os::native_path(buf);
+  LPWSTR prefix = NULL;
+  int prefix_off = 0;
+  bool needs_fullpath = true;
+  set_path_prefix(buf, &prefix, &prefix_off, &needs_fullpath);
 
-    wchar_t* prefix;
-    int prefix_off = 0;
-    bool is_abs = true;
-    bool needs_fullpath = true;
-
-    if (::isalpha(buf[0]) && !::IsDBCSLeadByte(buf[0]) && buf[1] == ':' && buf[2] == '\\') {
-      prefix = L"\\\\?\\";
-    } else if (buf[0] == '\\' && buf[1] == '\\') {
-      if (buf[2] == '?' && buf[3] == '\\') {
-        prefix = L"";
-        needs_fullpath = false;
-      } else {
-        prefix = L"\\\\?\\UNC";
-        prefix_off = 1; // Overwrite the first char with the prefix, so \\share\path becomes \\?\UNC\share\path
-      }
-    } else {
-      is_abs = false;
-      prefix = L"\\\\?\\";
-    }
-
-    size_t buf_len = strlen(buf);
-    size_t prefix_len = wcslen(prefix);
-    size_t full_path_size = is_abs ? 1 + buf_len : JVM_MAXPATHLEN;
-    size_t result_size = prefix_len + full_path_size - prefix_off;
-    result = (wchar_t*) os::malloc(sizeof(wchar_t) * (additional_space + result_size), mtInternal);
-
-    if (result == NULL) {
-      err = ENOMEM;
-    } else {
-      size_t converted_chars;
-      wchar_t* path_start = result + prefix_len - prefix_off;
-      err = ::mbstowcs_s(&converted_chars, path_start, buf_len + 1, buf, buf_len);
-
-      if ((err == ERROR_SUCCESS) && needs_fullpath) {
-        wchar_t* tmp = (wchar_t*) os::malloc(sizeof(wchar_t) * full_path_size, mtInternal);
-
-        if (tmp == NULL) {
-          err = ENOMEM;
-        } else {
-          if (!_wfullpath(tmp, path_start, full_path_size)) {
-            err = ENOENT;
-          } else {
-            ::memcpy(path_start, tmp, (1 + wcslen(tmp)) * sizeof(wchar_t));
-          }
-
-          os::free(tmp);
-        }
-      }
-
-      memcpy(result, prefix, sizeof(wchar_t) * prefix_len);
-
-      // Remove trailing pathsep (not for \\?\<DRIVE>:\, since it would make it relative)
-      size_t result_len = wcslen(result);
-
-      if (result[result_len - 1] == L'\\') {
-        if (!(::iswalpha(result[4]) && result[5] == L':' && result_len == 7)) {
-          result[result_len - 1] = L'\0';
-        }
-      }
-    }
-  }
-
-  os::free(buf);
-
+  LPWSTR unicode_path = NULL;
+  err = convert_to_unicode(buf, &unicode_path);
+  FREE_C_HEAP_ARRAY(char, buf);
   if (err != ERROR_SUCCESS) {
-    os::free(result);
-    result = NULL;
+    return NULL;
   }
 
-  return result;
+  LPWSTR converted_path = NULL;
+  if (needs_fullpath) {
+    err = get_full_path(unicode_path, &converted_path);
+  } else {
+    converted_path = unicode_path;
+  }
+
+  LPWSTR result = NULL;
+  if (converted_path != NULL) {
+    size_t prefix_len = wcslen(prefix);
+    size_t result_len = prefix_len - prefix_off + wcslen(converted_path) + additional_space + 1;
+    result = NEW_C_HEAP_ARRAY(WCHAR, result_len, mtInternal);
+    _snwprintf(result, result_len, L"%s%s", prefix, &converted_path[prefix_off]);
+
+    // Remove trailing pathsep (not for \\?\<DRIVE>:\, since it would make it relative)
+    result_len = wcslen(result);
+    if ((result[result_len - 1] == L'\\') &&
+        !(::iswalpha(result[4]) && result[5] == L':' && result_len == 7)) {
+      result[result_len - 1] = L'\0';
+    }
+  }
+
+  if (converted_path != unicode_path) {
+    FREE_C_HEAP_ARRAY(WCHAR, converted_path);
+  }
+  FREE_C_HEAP_ARRAY(WCHAR, unicode_path);
+
+  return static_cast<wchar_t*>(result); // LPWSTR and wchat_t* are the same type on Windows.
 }
 
 int os::stat(const char *path, struct stat *sbuf) {
@@ -5132,7 +5149,7 @@ int os::PlatformEvent::park(jlong Millis) {
   int v;
   for (;;) {
     v = _Event;
-    if (Atomic::cmpxchg(v-1, &_Event, v) == v) break;
+    if (Atomic::cmpxchg(&_Event, v, v-1) == v) break;
   }
   guarantee((v == 0) || (v == 1), "invariant");
   if (v != 0) return OS_OK;
@@ -5194,7 +5211,7 @@ void os::PlatformEvent::park() {
   int v;
   for (;;) {
     v = _Event;
-    if (Atomic::cmpxchg(v-1, &_Event, v) == v) break;
+    if (Atomic::cmpxchg(&_Event, v, v-1) == v) break;
   }
   guarantee((v == 0) || (v == 1), "invariant");
   if (v != 0) return;
@@ -5232,7 +5249,7 @@ void os::PlatformEvent::unpark() {
   // from the first park() call after an unpark() call which will help
   // shake out uses of park() and unpark() without condition variables.
 
-  if (Atomic::xchg(1, &_Event) >= 0) return;
+  if (Atomic::xchg(&_Event, 1) >= 0) return;
 
   ::SetEvent(_ParkHandle);
 }

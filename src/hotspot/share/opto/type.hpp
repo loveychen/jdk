@@ -166,6 +166,7 @@ private:
 #endif
 
   const Type *meet_helper(const Type *t, bool include_speculative) const;
+  void check_symmetrical(const Type *t, const Type *mt) const;
 
 protected:
   // Each class of type is also identified by its base.
@@ -452,10 +453,10 @@ public:
   const Type* maybe_remove_speculative(bool include_speculative) const;
 
   virtual bool maybe_null() const { return true; }
+  virtual bool is_known_instance() const { return false; }
 
 private:
   // support arrays
-  static const BasicType _basic_type[];
   static const Type*        _zero_type[T_CONFLICT+1];
   static const Type* _const_basic_type[T_CONFLICT+1];
 };
@@ -1031,8 +1032,6 @@ public:
 
   virtual const TypeOopPtr *cast_to_instance_id(int instance_id) const;
 
-  virtual const TypeOopPtr *cast_to_nonconst() const;
-
   // corresponding pointer to klass, for a given instance
   const TypeKlassPtr* as_klass_type() const;
 
@@ -1116,8 +1115,6 @@ class TypeInstPtr : public TypeOopPtr {
   virtual const Type *cast_to_exactness(bool klass_is_exact) const;
 
   virtual const TypeOopPtr *cast_to_instance_id(int instance_id) const;
-
-  virtual const TypeOopPtr *cast_to_nonconst() const;
 
   virtual const TypePtr *add_offset( intptr_t offset ) const;
 
@@ -1203,8 +1200,6 @@ public:
 
   virtual const TypeOopPtr *cast_to_instance_id(int instance_id) const;
 
-  virtual const TypeOopPtr *cast_to_nonconst() const;
-
   virtual const TypeAryPtr* cast_to_size(const TypeInt* size) const;
   virtual const TypeInt* narrow_size_type(const TypeInt* size) const;
 
@@ -1224,6 +1219,8 @@ public:
   int stable_dimension() const;
 
   const TypeAryPtr* cast_to_autobox_cache(bool cache) const;
+
+  static jint max_array_length(BasicType etype) ;
 
   // Convenience common pre-built types.
   static const TypeAryPtr *RANGE;
@@ -1400,6 +1397,10 @@ public:
   // returns the equivalent ptr type for this compressed pointer
   const TypePtr *get_ptrtype() const {
     return _ptrtype;
+  }
+
+  bool is_known_instance() const {
+    return _ptrtype->is_known_instance();
   }
 
 #ifndef PRODUCT

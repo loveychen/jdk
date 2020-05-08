@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2015, 2019, Red Hat, Inc. All rights reserved.
+ * Copyright (c) 2015, 2020, Red Hat, Inc. All rights reserved.
+ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 only, as
@@ -47,9 +48,13 @@
 #include "utilities/copy.hpp"
 #include "utilities/globalDefinitions.hpp"
 
+inline ShenandoahHeap* ShenandoahHeap::heap() {
+  assert(_heap != NULL, "Heap is not initialized yet");
+  return _heap;
+}
 
 inline ShenandoahHeapRegion* ShenandoahRegionIterator::next() {
-  size_t new_index = Atomic::add((size_t) 1, &_index);
+  size_t new_index = Atomic::add(&_index, (size_t) 1);
   // get_region() provides the bounds-check and returns NULL on OOB.
   return _heap->get_region(new_index - 1);
 }
@@ -131,20 +136,20 @@ inline oop ShenandoahHeap::evac_update_with_forwarded(T* p) {
 
 inline oop ShenandoahHeap::cas_oop(oop n, oop* addr, oop c) {
   assert(is_aligned(addr, HeapWordSize), "Address should be aligned: " PTR_FORMAT, p2i(addr));
-  return (oop) Atomic::cmpxchg(n, addr, c);
+  return (oop) Atomic::cmpxchg(addr, c, n);
 }
 
 inline oop ShenandoahHeap::cas_oop(oop n, narrowOop* addr, narrowOop c) {
   assert(is_aligned(addr, sizeof(narrowOop)), "Address should be aligned: " PTR_FORMAT, p2i(addr));
   narrowOop val = CompressedOops::encode(n);
-  return CompressedOops::decode((narrowOop) Atomic::cmpxchg(val, addr, c));
+  return CompressedOops::decode((narrowOop) Atomic::cmpxchg(addr, c, val));
 }
 
 inline oop ShenandoahHeap::cas_oop(oop n, narrowOop* addr, oop c) {
   assert(is_aligned(addr, sizeof(narrowOop)), "Address should be aligned: " PTR_FORMAT, p2i(addr));
   narrowOop cmp = CompressedOops::encode(c);
   narrowOop val = CompressedOops::encode(n);
-  return CompressedOops::decode((narrowOop) Atomic::cmpxchg(val, addr, cmp));
+  return CompressedOops::decode((narrowOop) Atomic::cmpxchg(addr, cmp, val));
 }
 
 template <class T>
@@ -282,7 +287,7 @@ inline oop ShenandoahHeap::evacuate_object(oop p, Thread* thread) {
   }
 
   // Copy the object:
-  Copy::aligned_disjoint_words((HeapWord*) p, copy, size);
+  Copy::aligned_disjoint_words(cast_from_oop<HeapWord*>(p), copy, size);
 
   // Try to install the new forwarding pointer.
   oop copy_val = oop(copy);
@@ -323,13 +328,14 @@ inline bool ShenandoahHeap::requires_marking(const void* entry) const {
   return !_marking_context->is_marked(obj);
 }
 
-template <class T>
-inline bool ShenandoahHeap::in_collection_set(T p) const {
-  HeapWord* obj = (HeapWord*) p;
+inline bool ShenandoahHeap::in_collection_set(oop p) const {
   assert(collection_set() != NULL, "Sanity");
-  assert(is_in(obj), "should be in heap");
+  return collection_set()->is_in(p);
+}
 
-  return collection_set()->is_in(obj);
+inline bool ShenandoahHeap::in_collection_set_loc(void* p) const {
+  assert(collection_set() != NULL, "Sanity");
+  return collection_set()->is_in_loc(p);
 }
 
 inline bool ShenandoahHeap::is_stable() const {
@@ -337,15 +343,11 @@ inline bool ShenandoahHeap::is_stable() const {
 }
 
 inline bool ShenandoahHeap::is_idle() const {
-  return _gc_state.is_unset(MARKING | EVACUATION | UPDATEREFS | TRAVERSAL);
+  return _gc_state.is_unset(MARKING | EVACUATION | UPDATEREFS);
 }
 
 inline bool ShenandoahHeap::is_concurrent_mark_in_progress() const {
   return _gc_state.is_set(MARKING);
-}
-
-inline bool ShenandoahHeap::is_concurrent_traversal_in_progress() const {
-  return _gc_state.is_set(TRAVERSAL);
 }
 
 inline bool ShenandoahHeap::is_evacuation_in_progress() const {
@@ -370,6 +372,18 @@ inline bool ShenandoahHeap::is_full_gc_move_in_progress() const {
 
 inline bool ShenandoahHeap::is_update_refs_in_progress() const {
   return _gc_state.is_set(UPDATEREFS);
+}
+
+inline bool ShenandoahHeap::is_stw_gc_in_progress() const {
+  return is_full_gc_in_progress() || is_degenerated_gc_in_progress();
+}
+
+inline bool ShenandoahHeap::is_concurrent_strong_root_in_progress() const {
+  return _concurrent_strong_root_in_progress.is_set();
+}
+
+inline bool ShenandoahHeap::is_concurrent_weak_root_in_progress() const {
+  return _concurrent_weak_root_in_progress.is_set();
 }
 
 template<class T>

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -26,6 +26,7 @@
 #include "classfile/javaClasses.inline.hpp"
 #include "code/codeBlob.hpp"
 #include "code/codeCache.hpp"
+#include "compiler/compilerDefinitions.hpp"
 #include "gc/shared/gcCause.hpp"
 #include "gc/shared/gcName.hpp"
 #include "gc/shared/gcTrace.hpp"
@@ -39,6 +40,7 @@
 #include "jfr/support/jfrThreadLocal.hpp"
 #include "jfr/writers/jfrJavaEventWriter.hpp"
 #include "jfr/utilities/jfrThreadIterator.hpp"
+#include "memory/iterator.hpp"
 #include "memory/metaspaceGCThresholdUpdater.hpp"
 #include "memory/referenceType.hpp"
 #include "memory/universe.hpp"
@@ -239,17 +241,6 @@ void NarrowOopModeConstant::serialize(JfrCheckpointWriter& writer) {
   }
 }
 
-void CompilerPhaseTypeConstant::serialize(JfrCheckpointWriter& writer) {
-#ifdef COMPILER2
-  static const u4 nof_entries = PHASE_NUM_TYPES;
-  writer.write_count(nof_entries);
-  for (u4 i = 0; i < nof_entries; ++i) {
-    writer.write_key(i);
-    writer.write(CompilerPhaseTypeHelper::to_string((CompilerPhaseType)i));
-  }
-#endif
-}
-
 void CodeBlobTypeConstant::serialize(JfrCheckpointWriter& writer) {
   static const u4 nof_entries = CodeBlobType::NumTypes;
   writer.write_count(nof_entries);
@@ -292,4 +283,22 @@ void JfrThreadConstant::serialize(JfrCheckpointWriter& writer) {
   writer.write((const char*)NULL); // java name
   writer.write((traceid)0); // java thread id
   writer.write((traceid)0); // java thread group
+}
+
+void BytecodeConstant::serialize(JfrCheckpointWriter& writer) {
+  static const u4 nof_entries = Bytecodes::number_of_codes;
+  writer.write_count(nof_entries);
+  for (u4 i = 0; i < nof_entries; ++i) {
+    writer.write_key(i);
+    writer.write(Bytecodes::name((Bytecodes::Code)i));
+  }
+}
+
+void CompilerTypeConstant::serialize(JfrCheckpointWriter& writer) {
+  static const u4 nof_entries = compiler_number_of_types;
+  writer.write_count(nof_entries);
+  for (u4 i = 0; i < nof_entries; ++i) {
+    writer.write_key(i);
+    writer.write(compilertype2name((CompilerType)i));
+  }
 }

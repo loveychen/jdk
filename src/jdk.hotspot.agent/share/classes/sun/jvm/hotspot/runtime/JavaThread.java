@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2000, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -30,6 +30,8 @@ import sun.jvm.hotspot.debugger.*;
 import sun.jvm.hotspot.oops.*;
 import sun.jvm.hotspot.types.*;
 import sun.jvm.hotspot.utilities.*;
+import sun.jvm.hotspot.utilities.Observable;
+import sun.jvm.hotspot.utilities.Observer;
 
 /** This is an abstract class because there are certain OS- and
     CPU-specific operations (like the setting and getting of the last
@@ -384,14 +386,14 @@ public class JavaThread extends Thread {
     Address stackBase = getStackBase();
     // Be robust
     if (sp == null) return false;
-    return stackBase.greaterThanOrEqual(a) && sp.lessThanOrEqual(a);
+    return stackBase.greaterThan(a) && sp.lessThanOrEqual(a);
   }
 
   public boolean isLockOwned(Address a) {
     Address stackBase = getStackBase();
     Address stackLimit = stackBase.addOffsetTo(-getStackSize());
 
-    return stackBase.greaterThanOrEqual(a) && stackLimit.lessThanOrEqual(a);
+    return stackBase.greaterThan(a) && stackLimit.lessThanOrEqual(a);
 
     // FIXME: should traverse MonitorArray/MonitorChunks as in VM
   }

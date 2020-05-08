@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -37,7 +37,6 @@
 #include "memory/resourceArea.hpp"
 #include "memory/universe.hpp"
 #include "oops/method.hpp"
-#include "runtime/atomic.hpp"
 #include "runtime/interfaceSupport.inline.hpp"
 #include "runtime/handshake.hpp"
 #include "runtime/mutexLocker.hpp"
@@ -198,11 +197,11 @@ bool NMethodSweeper::wait_for_stack_scanning() {
   return _current.end();
 }
 
-class NMethodMarkingThreadClosure : public ThreadClosure {
+class NMethodMarkingClosure : public HandshakeClosure {
 private:
   CodeBlobClosure* _cl;
 public:
-  NMethodMarkingThreadClosure(CodeBlobClosure* cl) : _cl(cl) {}
+  NMethodMarkingClosure(CodeBlobClosure* cl) : HandshakeClosure("NMethodMarking"), _cl(cl) {}
   void do_thread(Thread* thread) {
     if (thread->is_Java_thread() && ! thread->is_Code_cache_sweeper_thread()) {
       JavaThread* jt = (JavaThread*) thread;
@@ -213,9 +212,9 @@ public:
 
 class NMethodMarkingTask : public AbstractGangTask {
 private:
-  NMethodMarkingThreadClosure* _cl;
+  NMethodMarkingClosure* _cl;
 public:
-  NMethodMarkingTask(NMethodMarkingThreadClosure* cl) :
+  NMethodMarkingTask(NMethodMarkingClosure* cl) :
     AbstractGangTask("Parallel NMethod Marking"),
     _cl(cl) {
     Threads::change_thread_claim_token();
@@ -240,7 +239,7 @@ void NMethodSweeper::mark_active_nmethods() {
   if (cl != NULL) {
     WorkGang* workers = Universe::heap()->get_safepoint_workers();
     if (workers != NULL) {
-      NMethodMarkingThreadClosure tcl(cl);
+      NMethodMarkingClosure tcl(cl);
       NMethodMarkingTask task(&tcl);
       workers->run_task(&task);
     } else {
@@ -251,12 +250,8 @@ void NMethodSweeper::mark_active_nmethods() {
 
 CodeBlobClosure* NMethodSweeper::prepare_mark_active_nmethods() {
 #ifdef ASSERT
-  if (ThreadLocalHandshakes) {
-    assert(Thread::current()->is_Code_cache_sweeper_thread(), "must be executed under CodeCache_lock and in sweeper thread");
-    assert_lock_strong(CodeCache_lock);
-  } else {
-    assert(SafepointSynchronize::is_at_safepoint(), "must be executed at a safepoint");
-  }
+  assert(Thread::current()->is_Code_cache_sweeper_thread(), "must be executed under CodeCache_lock and in sweeper thread");
+  assert_lock_strong(CodeCache_lock);
 #endif
 
   // If we do not want to reclaim not-entrant or zombie methods there is no need
@@ -318,19 +313,14 @@ CodeBlobClosure* NMethodSweeper::prepare_reset_hotness_counters() {
 void NMethodSweeper::do_stack_scanning() {
   assert(!CodeCache_lock->owned_by_self(), "just checking");
   if (wait_for_stack_scanning()) {
-    if (ThreadLocalHandshakes) {
-      CodeBlobClosure* code_cl;
-      {
-        MutexLocker ccl(CodeCache_lock, Mutex::_no_safepoint_check_flag);
-        code_cl = prepare_mark_active_nmethods();
-      }
-      if (code_cl != NULL) {
-        NMethodMarkingThreadClosure tcl(code_cl);
-        Handshake::execute(&tcl);
-      }
-    } else {
-      VM_MarkActiveNMethods op;
-      VMThread::execute(&op);
+    CodeBlobClosure* code_cl;
+    {
+      MutexLocker ccl(CodeCache_lock, Mutex::_no_safepoint_check_flag);
+      code_cl = prepare_mark_active_nmethods();
+    }
+    if (code_cl != NULL) {
+      NMethodMarkingClosure nm_cl(code_cl);
+      Handshake::execute(&nm_cl);
     }
   }
 }

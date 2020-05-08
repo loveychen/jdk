@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -37,9 +37,12 @@
 #include <windows.h>
 #include <winbase.h>
 #include <errno.h>
-#include "io_util_md.h"
 
-#undef DEBUG_PATH        /* Define this to debug path code */
+/* We should also include jdk_util.h here, for the prototype of JDK_Canonicalize.
+   This isn't possible though because canonicalize_md.c is as well used in
+   different contexts within Oracle.
+ */
+#include "io_util_md.h"
 
 /* Copy bytes to dst, not going past dend; return dst + number of bytes copied,
    or NULL if dend would have been exceeded.  If first != '\0', copy that byte
@@ -138,10 +141,6 @@ lastErrorReportable()
         || (errval == ERROR_NETWORK_ACCESS_DENIED)) {
         return 0;
     }
-
-#ifdef DEBUG_PATH
-    jio_fprintf(stderr, "canonicalize: errval %d\n", errval);
-#endif
     return 1;
 }
 
@@ -326,32 +325,40 @@ wcanonicalizeWithPrefix(WCHAR *canonicalPrefix, WCHAR *pathWithCanonicalPrefix, 
 }
 
 /* Non-Wide character version of canonicalize.
-   Converts to whchar and delegates to wcanonicalize. */
-int
-canonicalize(char* orig_path, char* result, int size) {
+   Converts to wchar and delegates to wcanonicalize. */
+JNIEXPORT int
+JDK_Canonicalize(const char *orig, char *out, int len) {
     wchar_t* wpath = NULL;
     wchar_t* wresult = NULL;
-    size_t conv;
-    size_t path_len = strlen(orig_path);
+    int wpath_len;
     int ret = -1;
 
-    if ((wpath = (wchar_t*) malloc(sizeof(wchar_t) * (path_len + 1))) == NULL) {
+    /* Get required buffer size to convert to Unicode */
+    wpath_len = MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS,
+                                    orig, -1, NULL, 0);
+    if (wpath_len == 0) {
         goto finish;
     }
 
-    if (mbstowcs_s(&conv, wpath, path_len + 1, orig_path, path_len) != 0) {
+    if ((wpath = (wchar_t*) malloc(sizeof(wchar_t) * wpath_len)) == NULL) {
         goto finish;
     }
 
-    if ((wresult = (wchar_t*) malloc(sizeof(wchar_t) * size)) == NULL) {
+    if (MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS,
+                            orig, -1, wpath, wpath_len) == 0) {
         goto finish;
     }
 
-    if (wcanonicalize(wpath, wresult, size) != 0) {
+    if ((wresult = (wchar_t*) malloc(sizeof(wchar_t) * len)) == NULL) {
         goto finish;
     }
 
-    if (wcstombs_s(&conv, result, (size_t) size, wresult, (size_t) (size - 1)) != 0) {
+    if (wcanonicalize(wpath, wresult, len) != 0) {
+        goto finish;
+    }
+
+    if (WideCharToMultiByte(CP_ACP, 0,
+                            wresult, -1, out, len, NULL, NULL) == 0) {
         goto finish;
     }
 
@@ -365,15 +372,14 @@ finish:
     return ret;
 }
 
-
-/* The appropriate location of getPrefixed() should be io_util_md.c, but
-   java.lang.instrument package has hardwired canonicalize_md.c into their
-   dll, to avoid complicate solution such as including io_util_md.c into
-   that package, as a workaround we put this method here.
+/* The appropriate location of getPrefixed() is io_util_md.c, but it is
+   also used in a non-OpenJDK context within Oracle. There, canonicalize_md.c
+   is already pulled in and compiled, so to avoid more complicated solutions
+   we keep this method here.
  */
 
-/* copy \\?\ or \\?\UNC\ to the front of path*/
-__declspec(dllexport) WCHAR*
+/* copy \\?\ or \\?\UNC\ to the front of path */
+JNIEXPORT WCHAR*
 getPrefixed(const WCHAR* path, int pathlen) {
     WCHAR* pathbuf = (WCHAR*)malloc((pathlen + 10) * sizeof (WCHAR));
     if (pathbuf != 0) {

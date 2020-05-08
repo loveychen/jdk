@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -22,6 +22,7 @@
  */
 
 #include "precompiled.hpp"
+#include "classfile/javaClasses.inline.hpp"
 #include "classfile/symbolTable.hpp"
 #include "compiler/compileBroker.hpp"
 #include "jvmci/jniAccessMark.inline.hpp"
@@ -34,6 +35,7 @@
 #include "oops/method.inline.hpp"
 #include "oops/objArrayKlass.hpp"
 #include "oops/oop.inline.hpp"
+#include "runtime/atomic.hpp"
 #include "runtime/biasedLocking.hpp"
 #include "runtime/deoptimization.hpp"
 #include "runtime/fieldDescriptor.inline.hpp"
@@ -381,48 +383,14 @@ address JVMCIRuntime::exception_handler_for_pc(JavaThread* thread) {
   return continuation;
 }
 
-JRT_ENTRY_NO_ASYNC(void, JVMCIRuntime::monitorenter(JavaThread* thread, oopDesc* obj, BasicLock* lock))
-  IF_TRACE_jvmci_3 {
-    char type[O_BUFLEN];
-    obj->klass()->name()->as_C_string(type, O_BUFLEN);
-    markWord mark = obj->mark();
-    TRACE_jvmci_3("%s: entered locking slow case with obj=" INTPTR_FORMAT ", type=%s, mark=" INTPTR_FORMAT ", lock=" INTPTR_FORMAT, thread->name(), p2i(obj), type, mark.value(), p2i(lock));
-    tty->flush();
-  }
-  if (PrintBiasedLockingStatistics) {
-    Atomic::inc(BiasedLocking::slow_path_entry_count_addr());
-  }
-  Handle h_obj(thread, obj);
-  assert(oopDesc::is_oop(h_obj()), "must be NULL or an object");
-  ObjectSynchronizer::enter(h_obj, lock, THREAD);
-  TRACE_jvmci_3("%s: exiting locking slow with obj=" INTPTR_FORMAT, thread->name(), p2i(obj));
+JRT_BLOCK_ENTRY(void, JVMCIRuntime::monitorenter(JavaThread* thread, oopDesc* obj, BasicLock* lock))
+  SharedRuntime::monitor_enter_helper(obj, lock, thread);
 JRT_END
 
 JRT_LEAF(void, JVMCIRuntime::monitorexit(JavaThread* thread, oopDesc* obj, BasicLock* lock))
-  assert(thread == JavaThread::current(), "threads must correspond");
   assert(thread->last_Java_sp(), "last_Java_sp must be set");
-  // monitorexit is non-blocking (leaf routine) => no exceptions can be thrown
-  EXCEPTION_MARK;
-
-#ifdef ASSERT
-  if (!oopDesc::is_oop(obj)) {
-    ResetNoHandleMark rhm;
-    nmethod* method = thread->last_frame().cb()->as_nmethod_or_null();
-    if (method != NULL) {
-      tty->print_cr("ERROR in monitorexit in method %s wrong obj " INTPTR_FORMAT, method->name(), p2i(obj));
-    }
-    thread->print_stack_on(tty);
-    assert(false, "invalid lock object pointer dected");
-  }
-#endif
-
-  ObjectSynchronizer::exit(obj, lock, THREAD);
-  IF_TRACE_jvmci_3 {
-    char type[O_BUFLEN];
-    obj->klass()->name()->as_C_string(type, O_BUFLEN);
-    TRACE_jvmci_3("%s: exited locking slow case with obj=" INTPTR_FORMAT ", type=%s, mark=" INTPTR_FORMAT ", lock=" INTPTR_FORMAT, thread->name(), p2i(obj), type, obj->mark().value(), p2i(lock));
-    tty->flush();
-  }
+  assert(oopDesc::is_oop(obj), "invalid lock object pointer dected");
+  SharedRuntime::monitor_exit_helper(obj, lock, thread);
 JRT_END
 
 // Object.notify() fast path, caller does slow path
@@ -453,22 +421,31 @@ JRT_LEAF(jboolean, JVMCIRuntime::object_notifyAll(JavaThread *thread, oopDesc* o
 
 JRT_END
 
-JRT_ENTRY(void, JVMCIRuntime::throw_and_post_jvmti_exception(JavaThread* thread, const char* exception, const char* message))
+JRT_BLOCK_ENTRY(int, JVMCIRuntime::throw_and_post_jvmti_exception(JavaThread* thread, const char* exception, const char* message))
+  JRT_BLOCK;
   TempNewSymbol symbol = SymbolTable::new_symbol(exception);
   SharedRuntime::throw_and_post_jvmti_exception(thread, symbol, message);
+  JRT_BLOCK_END;
+  return caller_is_deopted();
 JRT_END
 
-JRT_ENTRY(void, JVMCIRuntime::throw_klass_external_name_exception(JavaThread* thread, const char* exception, Klass* klass))
+JRT_BLOCK_ENTRY(int, JVMCIRuntime::throw_klass_external_name_exception(JavaThread* thread, const char* exception, Klass* klass))
+  JRT_BLOCK;
   ResourceMark rm(thread);
   TempNewSymbol symbol = SymbolTable::new_symbol(exception);
   SharedRuntime::throw_and_post_jvmti_exception(thread, symbol, klass->external_name());
+  JRT_BLOCK_END;
+  return caller_is_deopted();
 JRT_END
 
-JRT_ENTRY(void, JVMCIRuntime::throw_class_cast_exception(JavaThread* thread, const char* exception, Klass* caster_klass, Klass* target_klass))
+JRT_BLOCK_ENTRY(int, JVMCIRuntime::throw_class_cast_exception(JavaThread* thread, const char* exception, Klass* caster_klass, Klass* target_klass))
+  JRT_BLOCK;
   ResourceMark rm(thread);
   const char* message = SharedRuntime::generate_class_cast_message(caster_klass, target_klass);
   TempNewSymbol symbol = SymbolTable::new_symbol(exception);
   SharedRuntime::throw_and_post_jvmti_exception(thread, symbol, message);
+  JRT_BLOCK_END;
+  return caller_is_deopted();
 JRT_END
 
 JRT_LEAF(void, JVMCIRuntime::log_object(JavaThread* thread, oopDesc* obj, bool as_string, bool newline))
@@ -702,7 +679,7 @@ void JVMCINMethodData::clear_nmethod_mirror(nmethod* nm) {
 }
 
 void JVMCINMethodData::invalidate_nmethod_mirror(nmethod* nm) {
-  oop nmethod_mirror = get_nmethod_mirror(nm, /* phantom_ref */ true);
+  oop nmethod_mirror = get_nmethod_mirror(nm, /* phantom_ref */ false);
   if (nmethod_mirror == NULL) {
     return;
   }
@@ -917,7 +894,7 @@ void JVMCIRuntime::exit_on_pending_exception(JVMCIEnv* JVMCIENV, const char* mes
   JavaThread* THREAD = JavaThread::current();
 
   static volatile int report_error = 0;
-  if (!report_error && Atomic::cmpxchg(1, &report_error, 0) == 0) {
+  if (!report_error && Atomic::cmpxchg(&report_error, 0, 1) == 0) {
     // Only report an error once
     tty->print_raw_cr(message);
     if (JVMCIENV != NULL) {
@@ -1295,7 +1272,7 @@ JVMCI::CodeInstallResult JVMCIRuntime::validate_compile_task_dependencies(Depend
 static void fatal_exception_in_compile(JVMCIEnv* JVMCIENV, JavaThread* thread, const char* msg) {
   // Only report a fatal JVMCI compilation exception once
   static volatile int report_init_failure = 0;
-  if (!report_init_failure && Atomic::cmpxchg(1, &report_init_failure, 0) == 0) {
+  if (!report_init_failure && Atomic::cmpxchg(&report_init_failure, 0, 1) == 0) {
       tty->print_cr("%s:", msg);
       JVMCIENV->describe_pending_exception(true);
   }
@@ -1412,7 +1389,7 @@ JVMCI::CodeInstallResult JVMCIRuntime::register_method(JVMCIEnv* JVMCIENV,
   JVMCI::CodeInstallResult result;
   {
     // To prevent compile queue updates.
-    MutexLocker locker(MethodCompileQueue_lock, THREAD);
+    MutexLocker locker(THREAD, MethodCompileQueue_lock);
 
     // Prevent SystemDictionary::add_to_hierarchy from running
     // and invalidating our dependencies until we install this method.

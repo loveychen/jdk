@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -32,14 +32,9 @@
 
 // This is the abstracted interface for the safepoint implementation
 class SafepointMechanism : public AllStatic {
-  enum PollingType {
-    _global_page_poll,
-    _thread_local_poll
-  };
-  static PollingType _polling_type;
   static void* _poll_armed_value;
   static void* _poll_disarmed_value;
-  static void set_uses_thread_local_poll()            { _polling_type     = _thread_local_poll; }
+  static address _polling_page;
 
   static void* poll_armed_value()                     { return _poll_armed_value; }
   static void* poll_disarmed_value()                  { return _poll_disarmed_value; }
@@ -65,16 +60,8 @@ class SafepointMechanism : public AllStatic {
 public:
   static intptr_t poll_bit() { return _poll_bit; }
 
-  static bool uses_global_page_poll() { return _polling_type == _global_page_poll; }
-  static bool uses_thread_local_poll() { return _polling_type == _thread_local_poll; }
-
-  static bool supports_thread_local_poll() {
-#ifdef THREAD_LOCAL_POLL
-    return true;
-#else
-    return false;
-#endif
-  }
+  static address get_polling_page()             { return _polling_page; }
+  static bool    is_poll_address(address addr)  { return addr >= _polling_page && addr < (_polling_page + os::vm_page_size()); }
 
   // Call this method to see if this thread should block for a safepoint or process handshake.
   static inline bool should_block(Thread* thread);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -350,6 +350,26 @@ public abstract class CompareNode extends BinaryOpLogicNode implements Canonical
             assert condition == CanonicalCondition.BT;
             assert x.getStackKind().isNumericInteger();
             comparison = IntegerBelowNode.create(constantReflection, metaAccess, options, smallestCompareWidth, x, y, view);
+        }
+
+        return comparison;
+    }
+
+    public static LogicNode createFloatCompareNode(StructuredGraph graph, CanonicalCondition condition, ValueNode x, ValueNode y, boolean unorderedIsTrue, NodeView view) {
+        LogicNode result = createFloatCompareNode(condition, x, y, unorderedIsTrue, view);
+        return (result.graph() == null ? graph.addOrUniqueWithInputs(result) : result);
+    }
+
+    public static LogicNode createFloatCompareNode(CanonicalCondition condition, ValueNode x, ValueNode y, boolean unorderedIsTrue, NodeView view) {
+        assert x.getStackKind() == y.getStackKind();
+        assert x.getStackKind().isNumericFloat();
+
+        LogicNode comparison;
+        if (condition == CanonicalCondition.EQ) {
+            comparison = FloatEqualsNode.create(x, y, view);
+        } else {
+            assert condition == CanonicalCondition.LT;
+            comparison = FloatLessThanNode.create(x, y, unorderedIsTrue, view);
         }
 
         return comparison;

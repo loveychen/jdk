@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -27,9 +27,9 @@
 #include "classfile/vmSymbols.hpp"
 #include "memory/allocation.inline.hpp"
 #include "oops/oop.inline.hpp"
+#include "runtime/atomic.hpp"
 #include "runtime/handles.inline.hpp"
 #include "runtime/javaCalls.hpp"
-#include "runtime/orderAccess.hpp"
 #include "services/lowMemoryDetector.hpp"
 #include "services/management.hpp"
 #include "services/memoryManager.hpp"
@@ -65,13 +65,13 @@ MemoryManager* MemoryManager::get_metaspace_memory_manager() {
 instanceOop MemoryManager::get_memory_manager_instance(TRAPS) {
   // Must do an acquire so as to force ordering of subsequent
   // loads from anything _memory_mgr_obj points to or implies.
-  instanceOop mgr_obj = OrderAccess::load_acquire(&_memory_mgr_obj);
+  instanceOop mgr_obj = Atomic::load_acquire(&_memory_mgr_obj);
   if (mgr_obj == NULL) {
     // It's ok for more than one thread to execute the code up to the locked region.
     // Extra manager instances will just be gc'ed.
-    Klass* k = Management::sun_management_ManagementFactoryHelper_klass(CHECK_0);
+    Klass* k = Management::sun_management_ManagementFactoryHelper_klass(CHECK_NULL);
 
-    Handle mgr_name = java_lang_String::create_from_str(name(), CHECK_0);
+    Handle mgr_name = java_lang_String::create_from_str(name(), CHECK_NULL);
 
     JavaValue result(T_OBJECT);
     JavaCallArguments args;
@@ -80,7 +80,7 @@ instanceOop MemoryManager::get_memory_manager_instance(TRAPS) {
     Symbol* method_name = NULL;
     Symbol* signature = NULL;
     if (is_gc_memory_manager()) {
-      Klass* extKlass = Management::com_sun_management_internal_GarbageCollectorExtImpl_klass(CHECK_0);
+      Klass* extKlass = Management::com_sun_management_internal_GarbageCollectorExtImpl_klass(CHECK_NULL);
       // com.sun.management.GarbageCollectorMXBean is in jdk.management module which may not be present.
       if (extKlass != NULL) {
         k = extKlass;
@@ -102,7 +102,7 @@ instanceOop MemoryManager::get_memory_manager_instance(TRAPS) {
                            method_name,
                            signature,
                            &args,
-                           CHECK_0);
+                           CHECK_NULL);
 
     instanceOop m = (instanceOop) result.get_jobject();
     instanceHandle mgr(THREAD, m);
@@ -110,7 +110,7 @@ instanceOop MemoryManager::get_memory_manager_instance(TRAPS) {
     {
       // Get lock before setting _memory_mgr_obj
       // since another thread may have created the instance
-      MutexLocker ml(Management_lock);
+      MutexLocker ml(THREAD, Management_lock);
 
       // Check if another thread has created the management object.  We reload
       // _memory_mgr_obj here because some other thread may have initialized
@@ -118,7 +118,7 @@ instanceOop MemoryManager::get_memory_manager_instance(TRAPS) {
       //
       // The lock has done an acquire, so the load can't float above it, but
       // we need to do a load_acquire as above.
-      mgr_obj = OrderAccess::load_acquire(&_memory_mgr_obj);
+      mgr_obj = Atomic::load_acquire(&_memory_mgr_obj);
       if (mgr_obj != NULL) {
          return mgr_obj;
       }
@@ -130,7 +130,7 @@ instanceOop MemoryManager::get_memory_manager_instance(TRAPS) {
       // with creating the management object are visible before publishing
       // its address.  The unlock will publish the store to _memory_mgr_obj
       // because it does a release first.
-      OrderAccess::release_store(&_memory_mgr_obj, mgr_obj);
+      Atomic::release_store(&_memory_mgr_obj, mgr_obj);
     }
   }
 

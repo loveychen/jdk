@@ -26,6 +26,7 @@
 package jdk.jfr.api.consumer.recordingstream;
 
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import jdk.jfr.Event;
 import jdk.jfr.Name;
@@ -36,7 +37,7 @@ import jdk.jfr.consumer.RecordingStream;
  * @summary Tests RecordingStream::onEvent(...)
  * @key jfr
  * @requires vm.hasJFR
- * @library /test/lib
+ * @library /test/lib /test/jdk
  * @run main/othervm jdk.jfr.api.consumer.recordingstream.TestOnEvent
  */
 public class TestOnEvent {
@@ -58,6 +59,7 @@ public class TestOnEvent {
         testOnEvent();
         testNamedEvent();
         testTwoEventWithSameName();
+        testOnEventAfterStart();
     }
 
     private static void testOnEventNull() {
@@ -95,7 +97,7 @@ public class TestOnEvent {
                 System.out.println("testTwoEventWithSameName" +  e);
                 eventA.countDown();
             });
-            r.startAsync();
+            start(r);
             EventA a1 = new EventA();
             a1.commit();
             EventAlsoA a2 = new EventAlsoA();
@@ -123,7 +125,7 @@ public class TestOnEvent {
                 }
             });
 
-            r.startAsync();
+            start(r);
             EventA a = new EventA();
             a.commit();
             EventC c = new EventC();
@@ -141,12 +143,47 @@ public class TestOnEvent {
             r.onEvent(e -> {
                 event.countDown();
             });
-            r.startAsync();
+            start(r);
             EventA a = new EventA();
             a.commit();
             event.await();
         }
         log("Leaving testOnEvent()");
+    }
+
+    private static void testOnEventAfterStart() {
+        try (RecordingStream r = new RecordingStream()) {
+            EventProducer p = new EventProducer();
+            p.start();
+            Thread addHandler = new Thread(() ->  {
+                r.onEvent(e -> {
+                    // Got event, close stream
+                    r.close();
+                });
+            });
+            r.onFlush(() ->  {
+                // Only add handler once
+                if (!"started".equals(addHandler.getName()))  {
+                    addHandler.setName("started");
+                    addHandler.start();
+                }
+            });
+            r.start();
+            p.kill();
+        }
+    }
+
+    // Starts recording stream and ensures stream
+    // is receiving events before method returns.
+    private static void start(RecordingStream rs) throws InterruptedException {
+        CountDownLatch started = new CountDownLatch(1);
+        rs.onFlush(() -> {
+            if (started.getCount() > 0) {
+              started.countDown();
+            }
+        });
+        rs.startAsync();
+        started.await();
     }
 
     private static void log(String msg) {
